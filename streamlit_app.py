@@ -825,3 +825,293 @@ def sidebar():
             st.session_state.username=""
 
             st.rerun()
+            # =====================================================
+# AI 主頁
+# =====================================================
+
+
+def show_home():
+
+
+    st.title(
+        "🛒 AI 蝦皮半自動化 2.5 PRO"
+    )
+
+
+    st.caption(
+        "Gemini 2.5 + 即夢 AI 2.5 電商自動化"
+    )
+
+
+    col1,col2=st.columns(2)
+
+
+
+    with col1:
+
+
+        st.subheader(
+            "1. 上傳商品圖片"
+        )
+
+
+        image_file=st.file_uploader(
+
+            "選擇商品圖片",
+
+            type=[
+                "jpg",
+                "jpeg",
+                "png"
+            ]
+
+        )
+
+
+        if image_file:
+
+
+            st.image(
+                image_file,
+                use_container_width=True
+            )
+
+
+
+        st.subheader(
+            "2. 商品資料"
+        )
+
+
+        name=st.text_input(
+            "商品名稱"
+        )
+
+
+        price=st.text_input(
+            "商品價格"
+        )
+
+
+        cost=st.text_input(
+            "商品成本"
+        )
+
+
+        commission=st.text_input(
+            "分潤比例"
+        )
+
+
+        specs=st.text_area(
+            "商品規格"
+        )
+
+
+
+        run=st.button(
+
+            "🚀 開始 AI 分析",
+
+            type="primary"
+
+        )
+
+
+
+    with col2:
+
+
+        st.subheader(
+            "3. AI生成結果"
+        )
+
+
+        if run:
+
+
+            if not image_file:
+
+
+                st.warning(
+                    "請上傳商品圖片"
+                )
+
+
+            elif not name:
+
+
+                st.warning(
+                    "請輸入商品名稱"
+                )
+
+
+            else:
+
+
+                try:
+
+
+                    with st.spinner(
+                        "AI分析中..."
+                    ):
+
+
+                        img=process_image(
+                            image_file
+                        )
+
+
+                        data={
+
+                            "name":name,
+
+                            "price":price,
+
+                            "cost":cost,
+
+                            "commission":commission,
+
+                            "specs":specs
+
+                        }
+
+
+
+                        prompt=build_prompt(
+                            data
+                        )
+
+
+                        result=ask_gemini(
+
+                            prompt,
+
+                            img
+
+                        )
+
+
+                        st.session_state.result=result
+
+
+
+                except Exception as e:
+
+
+                    st.error(
+                        str(e)
+                    )
+
+
+
+        if st.session_state.result:
+
+
+            st.markdown(
+                st.session_state.result
+            )
+
+
+            st.download_button(
+
+                "下載報告",
+
+                st.session_state.result,
+
+                file_name="AI電商報告.txt"
+
+            )
+
+
+
+
+
+# =====================================================
+# 管理員
+# =====================================================
+
+
+def admin_page():
+
+
+    st.title(
+        "👑 管理員中心"
+    )
+
+
+    members=load_members()
+
+
+    st.write(
+        "會員數量：",
+        len(members)
+    )
+
+
+    for m in members:
+
+
+        st.write(
+            m["username"],
+            m["role"],
+            m["status"]
+        )
+
+
+
+
+
+# =====================================================
+# 主程式
+# =====================================================
+
+
+def main():
+
+
+    if not st.session_state.login:
+
+
+        show_login()
+
+
+    else:
+
+
+        sidebar()
+
+
+        if st.session_state.role=="admin":
+
+
+            page=st.selectbox(
+
+                "功能",
+
+                [
+                    "AI商品分析",
+                    "管理員中心"
+                ]
+
+            )
+
+
+            if page=="管理員中心":
+
+                admin_page()
+
+            else:
+
+                show_home()
+
+
+        else:
+
+            show_home()
+
+
+
+if __name__=="__main__":
+
+    main()
