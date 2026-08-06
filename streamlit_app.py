@@ -1,405 +1,350 @@
-import io
-import os
-import json
-import hashlib
-import secrets
-from pathlib import Path
-from datetime import datetime
-
-import streamlit as st
-from PIL import Image, ImageOps
-
-
-# ============================================================
-# 基本設定
-# ============================================================
-
-APP_NAME = "AI 蝦皮半自動化 2.5 PRO"
-GEMINI_MODEL = "gemini-2.5-flash"
-
-BASE_DIR = Path(__file__).resolve().parent
-DATA_DIR = BASE_DIR / "data"
-MEMBERS_FILE = DATA_DIR / "members.json"
-
-DATA_DIR.mkdir(parents=True, exist_ok=True)
-
-# 預設管理員
-ADMIN_USERNAME = "admin"
-DEFAULT_ADMIN_PASSWORD = "admin123456"
-
-
-# ============================================================
-# Streamlit 頁面設定
-# ============================================================
-
-st.set_page_config(
-    page_title=APP_NAME,
-    page_icon="🛒",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
-
-
-# ============================================================
-# CSS 樣式
-# ============================================================
-
-st.markdown(
-    """
-    <style>
-    .main-title {
-        font-size: 2.2rem;
-        font-weight: 800;
-        margin-bottom: 5px;
-    }
-
-    .sub-title {
-        color: #777;
-        margin-bottom: 20px;
-    }
-
-    .member-card {
-        padding: 15px;
-        border-radius: 12px;
-        border: 1px solid rgba(128,128,128,.25);
-        margin-bottom: 15px;
-    }
-
-    .small-note {
-        color: #777;
-        font-size: 0.9rem;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
-
-
-# ============================================================
-# Session State 初始化
-# ============================================================
-
-DEFAULT_SESSION = {
-    "logged_in": False,
-    "username": "",
-    "name": "",
-    "role": "",
-    "page": "home",
-    "result": "",
-}
-
-for key, value in DEFAULT_SESSION.items():
-    if key not in st.session_state:
-        st.session_state[key] = value
-
-
-# ============================================================
-# 密碼處理 (PBKDF2 安全雜湊)
-# ============================================================
-
-def hash_password(password, salt=None):
-    if salt is None:
-        salt = secrets.token_hex(16)
-
-    digest = hashlib.pbkdf2_hmac(
-        "sha256",
-        password.encode("utf-8"),
-        salt.encode("utf-8"),
-        200000,
-    ).hex()
-
-    return f"{salt}${digest}"
-
-
-def verify_password(password, stored_password):
-    try:
-        salt, saved_digest = stored_password.split("$", 1)
-
-        check_digest = hashlib.pbkdf2_hmac(
-            "sha256",
-            password.encode("utf-8"),
-            salt.encode("utf-8"),
-            200000,
-        ).hex()
-
-        return secrets.compare_digest(
-            check_digest,
-            saved_digest,
-        )
-
-    except Exception:
-        return False
-
-
-# ============================================================
-# 會員資料管理 (JSON 持久化)
-# ============================================================
-
-def load_members():
-    if not MEMBERS_FILE.exists():
-        return []
-
-    try:
-        data = json.loads(
-            MEMBERS_FILE.read_text(encoding="utf-8")
-        )
-        if isinstance(data, list):
-            return data
-    except Exception:
-        return []
-
-    return []
-
-
-def save_members(members):
-    temp_file = MEMBERS_FILE.with_suffix(".tmp")
-    temp_file.write_text(
-        json.dumps(members, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    temp_file.replace(MEMBERS_FILE)
-
-
-def find_member(username):
-    username = username.strip()
-    for member in load_members():
-        if member.get("username") == username:
-            return member
-    return None
-
-
-def ensure_admin():
-    members = load_members()
-    admin = None
-    for member in members:
-        if member.get("username") == ADMIN_USERNAME:
-            admin = member
-            break
-
-    if admin is None:
-        members.append(
-            {
-                "username": ADMIN_USERNAME,
-                "password_hash": hash_password(DEFAULT_ADMIN_PASSWORD),
-                "name": "系統管理員",
-                "email": "",
-                "role": "admin",
-                "status": "active",
-                "membership": "永久",
-                "created_at": datetime.now().isoformat(timespec="seconds"),
-            }
-        )
-        save_members(members)
-
-
-def create_member(username, password, name, email, role="member"):
-    username = username.strip()
-
-    if not username:
-        return False, "請輸入會員帳號。"
-    if len(username) < 3:
-        return False, "帳號至少需要 3 個字元。"
-    if len(username) > 32:
-        return False, "帳號最多 32 個字元。"
-
-    allowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-"
-    for char in username:
-        if char not in allowed:
-            return False, "帳號只能使用英文、數字、底線、點或連字號。"
-
-    if len(password) < 6:
-        return False, "密碼至少需要 6 個字元。"
-
-    if find_member(username) is not None:
-        return False, "這個帳號已存在。"
-
-    if role not in ["member", "vip", "admin"]:
-        role = "member"
-
-    members = load_members()
-    members.append(
-        {
-            "username": username,
-            "password_hash": hash_password(password),
-            "name": name.strip() or username,
-            "email": email.strip(),
-            "role": role,
-            "status": "active",
-            "membership": "永久",
-            "created_at": datetime.now().isoformat(timespec="seconds"),
-        }
-    )
-    save_members(members)
-    return True, "會員建立成功，期限為永久。"
-
-
-def login_user(username, password):
-    member = find_member(username)
-    if member is None:
-        return False, "帳號或密碼錯誤。"
-
-    if not verify_password(password, member.get("password_hash", "")):
-        return False, "帳號或密碼錯誤。"
-
-    if member.get("status") != "active":
-        return False, "這個會員帳號目前已被停用。"
-
-    st.session_state.logged_in = True
-    st.session_state.username = member.get("username", "")
-    st.session_state.name = member.get("name", member.get("username", ""))
-    st.session_state.role = member.get("role", "member")
-    st.session_state.page = "home"
-
-    return True, "登入成功。"
-
-
-def logout_user():
-    for key, value in DEFAULT_SESSION.items():
-        st.session_state[key] = value
-
-
-# ============================================================
-# Gemini API Key & Client 設置
-# ============================================================
-
-def get_gemini_api_key():
-    try:
-        key = st.secrets.get("GEMINI_API_KEY", "")
-        if key:
-            return key
-    except Exception:
-        pass
-
-    return os.getenv("GEMINI_API_KEY", "")
-
-
-def get_gemini_client():
-    try:
-        from google import genai
-    except ImportError as exc:
-        raise RuntimeError(
-            "找不到 google-genai。請確認 requirements.txt 已經安裝。"
-        ) from exc
-
-    api_key = get_gemini_api_key()
-    if not api_key:
-        raise RuntimeError(
-            "找不到 GEMINI_API_KEY。請到 Streamlit Cloud → App Settings → Secrets 設定。"
-        )
-
-    return genai.Client(api_key=api_key)
-
-
-def ask_gemini(prompt, image_bytes=None, mime_type="image/jpeg"):
-    client = get_gemini_client()
-
-    if image_bytes:
-        from google.genai import types
-
-        contents = [
-            types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
-            prompt,
-        ]
-    else:
-        contents = prompt
-
-    response = client.models.generate_content(
-        model=GEMINI_MODEL,
-        contents=contents,
-    )
-
-    text = getattr(response, "text", None)
-    if not text:
-        raise RuntimeError("Gemini 沒有回傳內容。")
-
-    return text.strip()
-
-
-def prepare_image(uploaded_file):
-    raw_data = uploaded_file.getvalue()
-    try:
-        image = Image.open(io.BytesIO(raw_data))
-        image = ImageOps.exif_transpose(image)
-
-        if image.mode not in ["RGB", "RGBA"]:
-            image = image.convert("RGB")
-
-        max_size = 1600
-        if max(image.size) > max_size:
-            ratio = max_size / max(image.size)
-            new_width = max(1, int(image.width * ratio))
-            new_height = max(1, int(image.height * ratio))
-            image = image.resize(
-                (new_width, new_height),
-                Image.Resampling.LANCZOS,
-            )
-
-        output = io.BytesIO()
-        if image.mode == "RGBA":
-            image.save(output, format="PNG", optimize=True)
-            return output.getvalue(), "image/png"
-
-        image.save(output, format="JPEG", quality=92, optimize=True)
-        return output.getvalue(), "image/jpeg"
-
-    except Exception as exc:
-        raise RuntimeError(f"圖片處理失敗：{exc}") from exc
-
-
-# ============================================================
-# 即夢 AI 2.5 核心規則 & 蝦皮/TikTok 指令範本
-# ============================================================
-
 JIMENG_25_RULES = """
-【即夢 AI 2.5 商品原貌鎖定】
-1. 使用上傳圖片中的主要商品作為唯一主要商品。
-2. 保留商品品牌、包裝、瓶身、盒子與外觀、形狀比例、顏色、材質、Logo、標籤與文字。
-3. 不得自行修改品牌、包裝、顏色、形狀，不得捏造不存在的商品資料。
-4. 不確定資訊必須標示「待確認」。
+==================================================
+即夢 AI 2.5 PRO 核心控制規則
+==================================================
 
-【一致性與畫面規範】
-5. 整個畫面只能有一個主要商品，不得商品變形、融化、扭曲、漂浮、閃爍或消失。
-6. 不要人物、手、手臂、模特兒，不使用人體拿商品。
-7. 不要浮水印、錯誤價格、假贈品、額外商品。商品必須是視覺焦點，適合蝦皮與 TikTok 電商展示。
+【AI 商品辨識最高原則】
 
-【即夢 AI 2.5 生圖規格】
-- 比例：9:16 直式商業構圖。
-- 主體 Prompt 語言：高品質英文描述 (High-end product photography, Studio lighting, 8k resolution)。
-- 畫面中文文字：繁體中文（如促銷標題、賣點文字）。
-- 必需包含 Negative Prompt，明確剔除人物、變形、多餘雜物與浮水印。
+1. 上傳圖片中的商品為唯一真實來源。
+2. AI 必須優先辨識：
+- 最大面積商品
+- 最清楚商品
+- 有品牌標誌商品
+- 包裝文字最完整商品
 
-【即夢 AI 2.5 影片規格】
-- Opening：完整商品正面置中，清晰展示品牌與外觀。
-- Middle：smooth slow push-in / dolly-in，細緻呈現材質與細節。
-- Motion & Lighting：平滑穩定的鏡頭運動、商業攝影棚光影、高對比焦點。
-- Ending：商品置中且 Ending freeze frame (定格結尾)。
-"""
+3. 禁止自行幻想商品資訊。
+4. 圖片看不清楚：
+必須輸出：
+「待確認」
 
-SHOPEE_PROMPT_TEMPLATE = """
-【蝦皮高轉化上架文案要求】
-1. SEO 搜尋最佳化標題：包含「品牌/品名 + 核心功效 + 規格/適用對象 + 熱門關鍵字」，不超過 60 字。
-2. 5 大爆款賣點：簡短有力，解決買家痛點，善用 Emoji 標示。
-3. 完整商品描述：包含產品優勢、使用方法、適用對象、安心保障。
-4. 規格明細欄位：條列容量、產地、保存期限、材質等。
-5. 購買提醒與溫馨提示：包含出貨時間、售後服務政策。
-6. 熱門 Hashtag：10~15 個蝦皮熱搜標籤。
-"""
-
-TIKTOK_PROMPT_TEMPLATE = """
-【TikTok / 短影音帶貨文案要求】
-1. 3 秒黃金 Hook (吸睛開頭)：提供 3 種不同切入點 (痛點型、好奇型、促銷型)。
-2. 15-30 秒口播腳本：語速明快、口語化、具說服力與親和力。
-3. 貼文文案 (Caption)：精簡爆款文案，引導點擊購物車。
-4. 強力 CTA (行動呼籲)：促使立即下單的指令。
-5. 熱門 Hashtag：精選 TikTok / Reels 爆款標籤。
-"""
+禁止：
+- 自創品牌
+- 自創容量
+- 自創功效
+- 自創成分
+- 自創價格
 
 
-def build_master_prompt(product):
-    # 提取變數以確保語法解析安全
-    p_name = product.get("name", "")
-    p_price = product.get("price", "")
-    p_cost = product.get("cost", "")
+==================================================
+【商品原貌鎖定 Product Identity Lock】
+==================================================
+
+生成任何圖片與影片：
+
+必須保持：
+
+✓ 商品品牌
+✓ Logo
+✓ 包裝
+✓ 瓶身
+✓ 盒型
+✓ 顏色
+✓ 材質
+✓ 比例
+✓ 標籤
+✓ 印刷文字
+
+完全一致。
+
+
+禁止：
+
+❌ 改變瓶身
+❌ 改變盒子
+❌ 改變顏色
+❌ 改變品牌
+❌ 改變文字
+❌ 生成類似商品代替
+
+
+==================================================
+【商品一致性控制】
+==================================================
+
+整個影片：
+
+第一秒商品是什麼，
+最後一秒必須還是同一個商品。
+
+
+禁止：
+
+❌ 商品變形
+❌ 商品融化
+❌ 商品漂浮
+❌ 商品複製
+❌ 多個商品
+❌ 包裝變形
+❌ Logo錯亂
+❌ 文字漂移
+❌ 閃爍
+
+
+==================================================
+【人物限制】
+==================================================
+
+所有商業圖片：
+
+禁止：
+
+❌ 人物
+❌ 手拿商品
+❌ 模特展示
+❌ 人體部位
+❌ 主播
+
+
+商品必須：
+
+單獨展示。
+
+
+==================================================
+【商業攝影規格】
+==================================================
+
+風格：
+
+High-end commercial product photography
+
+要求：
+
+- Studio lighting
+- Ultra realistic
+- 8K quality
+- Professional advertising style
+- Clean background
+- Product centered
+
+
+適合：
+
+✓ Shopee 主圖
+✓ TikTok 商品影片
+✓ 電商廣告
+
+
+==================================================
+【即夢 AI 2.5 生圖輸出格式】
+==================================================
+
+每次必須輸出：
+
+【English Prompt】
+
+內容包含：
+
+Product
+Material
+Lighting
+Camera angle
+Composition
+Background
+Commercial style
+
+
+【Negative Prompt】
+
+固定加入：
+
+no people,
+no hands,
+no watermark,
+no extra products,
+no wrong logo,
+no fake text,
+no deformation,
+no duplicate object,
+no floating package
+
+
+【繁體中文海報文字】
+
+只能使用：
+
+繁體中文
+
+禁止：
+
+簡體中文
+
+
+==================================================
+【即夢 AI 2.5 影片控制】
+==================================================
+
+影片比例：
+
+9:16
+
+
+時間：
+
+15-30秒
+
+
+影片結構：
+
+
+Opening 0-3秒
+
+完整商品正面展示
+
+商品置中
+
+
+Middle 3-20秒
+
+慢慢推近：
+
+smooth camera push in
+
+展示：
+
+- 包裝細節
+- 材質
+- Logo
+- 商品特色
+
+
+Ending 20-30秒
+
+商品置中
+
+畫面停止
+
+Freeze Frame
+
+
+==================================================
+【爆款帶貨影片腳本】
+==================================================
+
+
+0-3秒：
+
+黃金Hook
+
+方式：
+
+痛點
+驚喜
+好奇
+
+
+3-8秒：
+
+商品展示
+
+
+8-15秒：
+
+核心賣點
+
+
+15-20秒：
+
+使用情境
+
+
+20-30秒：
+
+CTA
+
+例如：
+
+立即購買
+加入購物車
+限時優惠
+
+
+==================================================
+【蝦皮SEO規則】
+==================================================
+
+標題：
+
+品牌 + 商品名稱 + 核心特色 + 規格 + 熱搜詞
+
+
+禁止：
+
+❌ 過度誇大
+❌ 虛假醫療效果
+❌ 100%保證
+
+
+輸出：
+
+1. SEO標題
+
+2. 五大賣點
+
+3. 商品描述
+
+4. 規格表
+
+5. 使用方式
+
+6. 注意事項
+
+7. Hashtag
+
+
+==================================================
+【TikTok 爆款規則】
+==================================================
+
+
+輸出：
+
+Hook 3版本
+
+↓
+
+15-30秒口播稿
+
+↓
+
+Caption
+
+↓
+
+CTA
+
+↓
+
+熱門Hashtag
+
+
+語氣：
+
+自然
+快速
+有購買衝動
+
+
+==================================================
+【AI 合規檢查】
+==================================================
+
+
+最後必須檢查：
+
+✓ 是否符合商品圖片
+✓ 是否虛構資訊
+✓ 是否誇大效果
+✓ 是否違反平台規則
+✓ 是否符合電商展示
+
+
+如果資料不足：
+
+輸出：
+
+「待確認」
+"""et("cost", "")
     p_comm = product.get("commission", "")
     p_sales = product.get("sales", "")
     p_rating = product.get("rating", "")
