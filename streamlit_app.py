@@ -10,9 +10,9 @@ import streamlit as st
 from PIL import Image, ImageOps
 
 
-# =====================================================
-# APP 基礎設定
-# =====================================================
+# ============================================================
+# 基本設定
+# ============================================================
 
 APP_NAME = "AI 蝦皮半自動化 2.5 PRO"
 GEMINI_MODEL = "gemini-2.5-flash"
@@ -23,25 +23,69 @@ MEMBERS_FILE = DATA_DIR / "members.json"
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
+# 預設管理員
+ADMIN_USERNAME = "admin"
+DEFAULT_ADMIN_PASSWORD = "admin123456"
+
+
+# ============================================================
+# Streamlit 頁面設定
+# ============================================================
+
 st.set_page_config(
     page_title=APP_NAME,
     page_icon="🛒",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="expanded",
 )
 
 
-# =====================================================
+# ============================================================
+# CSS 樣式
+# ============================================================
+
+st.markdown(
+    """
+    <style>
+    .main-title {
+        font-size: 2.2rem;
+        font-weight: 800;
+        margin-bottom: 5px;
+    }
+
+    .sub-title {
+        color: #777;
+        margin-bottom: 20px;
+    }
+
+    .member-card {
+        padding: 15px;
+        border-radius: 12px;
+        border: 1px solid rgba(128,128,128,.25);
+        margin-bottom: 15px;
+    }
+
+    .small-note {
+        color: #777;
+        font-size: 0.9rem;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+
+# ============================================================
 # Session State 初始化
-# =====================================================
+# ============================================================
 
 DEFAULT_SESSION = {
-    "login": False,
+    "logged_in": False,
     "username": "",
     "name": "",
     "role": "",
     "page": "home",
-    "result": ""
+    "result": "",
 }
 
 for key, value in DEFAULT_SESSION.items():
@@ -49,9 +93,9 @@ for key, value in DEFAULT_SESSION.items():
         st.session_state[key] = value
 
 
-# =====================================================
-# 密碼安全雜湊 (PBKDF2)
-# =====================================================
+# ============================================================
+# 密碼處理 (PBKDF2 安全雜湊)
+# ============================================================
 
 def hash_password(password, salt=None):
     if salt is None:
@@ -61,113 +105,152 @@ def hash_password(password, salt=None):
         "sha256",
         password.encode("utf-8"),
         salt.encode("utf-8"),
-        100000
+        200000,
     ).hex()
 
     return f"{salt}${digest}"
 
 
-def check_password(password, saved):
+def verify_password(password, stored_password):
     try:
-        salt, saved_digest = saved.split("$", 1)
+        salt, saved_digest = stored_password.split("$", 1)
+
         check_digest = hashlib.pbkdf2_hmac(
             "sha256",
             password.encode("utf-8"),
             salt.encode("utf-8"),
-            100000
+            200000,
         ).hex()
-        return secrets.compare_digest(check_digest, saved_digest)
+
+        return secrets.compare_digest(
+            check_digest,
+            saved_digest,
+        )
+
     except Exception:
         return False
 
 
-# =====================================================
-# 會員資料庫管理 (JSON 持久化)
-# =====================================================
+# ============================================================
+# 會員資料管理 (JSON 持久化)
+# ============================================================
 
 def load_members():
     if not MEMBERS_FILE.exists():
         return []
+
     try:
-        data = json.loads(MEMBERS_FILE.read_text(encoding="utf-8"))
+        data = json.loads(
+            MEMBERS_FILE.read_text(encoding="utf-8")
+        )
         if isinstance(data, list):
             return data
     except Exception:
         return []
+
     return []
 
 
-def save_members(data):
+def save_members(members):
     temp_file = MEMBERS_FILE.with_suffix(".tmp")
     temp_file.write_text(
-        json.dumps(data, ensure_ascii=False, indent=2),
-        encoding="utf-8"
+        json.dumps(members, ensure_ascii=False, indent=2),
+        encoding="utf-8",
     )
     temp_file.replace(MEMBERS_FILE)
 
 
 def find_member(username):
     username = username.strip()
-    for m in load_members():
-        if m.get("username") == username:
-            return m
+    for member in load_members():
+        if member.get("username") == username:
+            return member
     return None
 
 
 def ensure_admin():
     members = load_members()
-    admin_exists = any(m.get("username") == "admin" for m in members)
-    if not admin_exists:
-        members.append({
-            "username": "admin",
-            "password": hash_password("admin123456"),
-            "name": "系統管理員",
-            "role": "admin",
-            "status": "active",
-            "created": datetime.now().isoformat()
-        })
+    admin = None
+    for member in members:
+        if member.get("username") == ADMIN_USERNAME:
+            admin = member
+            break
+
+    if admin is None:
+        members.append(
+            {
+                "username": ADMIN_USERNAME,
+                "password_hash": hash_password(DEFAULT_ADMIN_PASSWORD),
+                "name": "系統管理員",
+                "email": "",
+                "role": "admin",
+                "status": "active",
+                "membership": "永久",
+                "created_at": datetime.now().isoformat(timespec="seconds"),
+            }
+        )
         save_members(members)
 
 
-def register_user(username, password, name):
+def create_member(username, password, name, email, role="member"):
     username = username.strip()
+
     if not username:
-        return False, "請輸入帳號。"
+        return False, "請輸入會員帳號。"
     if len(username) < 3:
-        return False, "帳號長度至少需 3 個字元。"
+        return False, "帳號至少需要 3 個字元。"
+    if len(username) > 32:
+        return False, "帳號最多 32 個字元。"
+
+    allowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-"
+    for char in username:
+        if char not in allowed:
+            return False, "帳號只能使用英文、數字、底線、點或連字號。"
+
     if len(password) < 6:
-        return False, "密碼長度至少需 6 個字元。"
-    if find_member(username):
-        return False, "該帳號已存在。"
+        return False, "密碼至少需要 6 個字元。"
+
+    if find_member(username) is not None:
+        return False, "這個帳號已存在。"
+
+    if role not in ["member", "vip", "admin"]:
+        role = "member"
 
     members = load_members()
-    members.append({
-        "username": username,
-        "password": hash_password(password),
-        "name": name.strip() or username,
-        "role": "member",
-        "status": "active",
-        "created": datetime.now().isoformat()
-    })
+    members.append(
+        {
+            "username": username,
+            "password_hash": hash_password(password),
+            "name": name.strip() or username,
+            "email": email.strip(),
+            "role": role,
+            "status": "active",
+            "membership": "永久",
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+        }
+    )
     save_members(members)
-    return True, "註冊成功！請登入使用。"
+    return True, "會員建立成功，期限為永久。"
 
 
 def login_user(username, password):
-    user = find_member(username)
-    if not user:
-        return False
-    if not check_password(password, user.get("password", "")):
-        return False
-    if user.get("status") != "active":
-        return False
+    member = find_member(username)
+    if member is None:
+        return False, "帳號或密碼錯誤。"
 
-    st.session_state.login = True
-    st.session_state.username = user.get("username", "")
-    st.session_state.name = user.get("name", user.get("username", ""))
-    st.session_state.role = user.get("role", "member")
+    if not verify_password(password, member.get("password_hash", "")):
+        return False, "帳號或密碼錯誤。"
+
+    if member.get("status") != "active":
+        return False, "這個會員帳號目前已被停用。"
+
+    st.session_state.logged_in = True
+    st.session_state.username = member.get("username", "")
+    st.session_state.name = member.get("name", member.get("username", ""))
+    st.session_state.role = member.get("role", "member")
     st.session_state.page = "home"
-    return True
+
+    return True, "登入成功。"
 
 
 def logout_user():
@@ -175,17 +258,18 @@ def logout_user():
         st.session_state[key] = value
 
 
-# =====================================================
-# Gemini API 與 Client 設定
-# =====================================================
+# ============================================================
+# Gemini API Key & Client 設置
+# ============================================================
 
-def get_gemini_key():
+def get_gemini_api_key():
     try:
         key = st.secrets.get("GEMINI_API_KEY", "")
         if key:
             return key
     except Exception:
         pass
+
     return os.getenv("GEMINI_API_KEY", "")
 
 
@@ -193,13 +277,17 @@ def get_gemini_client():
     try:
         from google import genai
     except ImportError as exc:
-        raise RuntimeError("缺少 google-genai 套件，請檢查 requirements.txt。") from exc
+        raise RuntimeError(
+            "找不到 google-genai。請確認 requirements.txt 已經安裝。"
+        ) from exc
 
-    key = get_gemini_key()
-    if not key:
-        raise RuntimeError("未設定 GEMINI_API_KEY，請於 Secrets 或環境變數中設定。")
+    api_key = get_gemini_api_key()
+    if not api_key:
+        raise RuntimeError(
+            "找不到 GEMINI_API_KEY。請到 Streamlit Cloud → App Settings → Secrets 設定。"
+        )
 
-    return genai.Client(api_key=key)
+    return genai.Client(api_key=api_key)
 
 
 def ask_gemini(prompt, image_bytes=None, mime_type="image/jpeg"):
@@ -207,190 +295,427 @@ def ask_gemini(prompt, image_bytes=None, mime_type="image/jpeg"):
 
     if image_bytes:
         from google.genai import types
+
         contents = [
             types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
-            prompt
+            prompt,
         ]
     else:
         contents = prompt
 
     response = client.models.generate_content(
         model=GEMINI_MODEL,
-        contents=contents
+        contents=contents,
     )
 
     text = getattr(response, "text", None)
     if not text:
-        return "AI 沒有回傳內容。"
+        raise RuntimeError("Gemini 沒有回傳內容。")
+
     return text.strip()
 
 
 def prepare_image(uploaded_file):
-    raw_bytes = uploaded_file.getvalue()
-    image = Image.open(io.BytesIO(raw_bytes))
-    image = ImageOps.exif_transpose(image)
+    raw_data = uploaded_file.getvalue()
+    try:
+        image = Image.open(io.BytesIO(raw_data))
+        image = ImageOps.exif_transpose(image)
 
-    if image.mode not in ["RGB", "RGBA"]:
-        image = image.convert("RGB")
+        if image.mode not in ["RGB", "RGBA"]:
+            image = image.convert("RGB")
 
-    max_size = 1600
-    if max(image.size) > max_size:
-        ratio = max_size / max(image.size)
-        new_w = int(image.width * ratio)
-        new_h = int(image.height * ratio)
-        image = image.resize((new_w, new_h), Image.Resampling.LANCZOS)
+        max_size = 1600
+        if max(image.size) > max_size:
+            ratio = max_size / max(image.size)
+            new_width = max(1, int(image.width * ratio))
+            new_height = max(1, int(image.height * ratio))
+            image = image.resize(
+                (new_width, new_height),
+                Image.Resampling.LANCZOS,
+            )
 
-    output = io.BytesIO()
-    if image.mode == "RGBA":
-        image.save(output, format="PNG", optimize=True)
-        return output.getvalue(), "image/png"
+        output = io.BytesIO()
+        if image.mode == "RGBA":
+            image.save(output, format="PNG", optimize=True)
+            return output.getvalue(), "image/png"
 
-    image.save(output, format="JPEG", quality=92, optimize=True)
-    return output.getvalue(), "image/jpeg"
+        image.save(output, format="JPEG", quality=92, optimize=True)
+        return output.getvalue(), "image/jpeg"
+
+    except Exception as exc:
+        raise RuntimeError(f"圖片處理失敗：{exc}") from exc
 
 
-# =====================================================
-# Prompt 指令範本規則
-# =====================================================
-
-BASE_AI_RULES = """
-你是 AI 蝦皮半自動化 2.5 PRO。
-
-最高規則：
-1. 商品圖片是唯一真實來源。
-2. 保持商品原貌：品牌、Logo、包裝、瓶身、盒型、顏色、材質、比例、標籤、文字。
-3. 禁止自行創造：不存在的品牌、不存在的規格、不存在的功能或價格。
-4. 資料不清楚或無法確認時，必須輸出：待確認。
-5. 禁止畫面出現：人物、手、模特、錯誤商品、多餘雜物或浮水印。
-6. 所有產出內容須符合蝦皮電商、TikTok 短影音與即夢 AI 2.5 規範。
-"""
+# ============================================================
+# 即夢 AI 2.5 核心規則 & 蝦皮/TikTok 指令範本
+# ============================================================
 
 JIMENG_25_RULES = """
-【即夢 AI 2.5 控制規則】
-1. 商品原貌鎖定：上傳圖片中的商品為唯一主體，不得任意修改外觀、品牌或顏色。
-2. 一致性控制：影片與圖片全程維持同一商品，不可變形、融化、扭曲、漂浮或重複。
-3. 人物限制：禁止人物、手部、模特或主播，商品需獨立展示。
-4. 商業攝影風格：High-end commercial product photography, 8K quality, studio lighting, clean background.
-5. 即夢生圖規格：
-   - 提供詳細 English Prompt (包含構圖、光影、材質與風格)。
-   - 固定 Negative Prompt (no people, no hands, no watermark, no extra products, no wrong logo, no deformation, no fake text)。
-   - 繁體中文畫面文字設計。
-6. 即夢影片規格：
-   - 比例：9:16 直式。
-   - Opening (0-3s)：商品正面清晰置中。
-   - Middle (3-20s)：慢速推近 (smooth camera push in)，展現材質與細節。
-   - Ending：商品置中定格 (Freeze frame)。
+【即夢 AI 2.5 商品原貌鎖定】
+1. 使用上傳圖片中的主要商品作為唯一主要商品。
+2. 保留商品品牌、包裝、瓶身、盒子與外觀、形狀比例、顏色、材質、Logo、標籤與文字。
+3. 不得自行修改品牌、包裝、顏色、形狀，不得捏造不存在的商品資料。
+4. 不確定資訊必須標示「待確認」。
+
+【一致性與畫面規範】
+5. 整個畫面只能有一個主要商品，不得商品變形、融化、扭曲、漂浮、閃爍或消失。
+6. 不要人物、手、手臂、模特兒，不使用人體拿商品。
+7. 不要浮水印、錯誤價格、假贈品、額外商品。商品必須是視覺焦點，適合蝦皮與 TikTok 電商展示。
+
+【即夢 AI 2.5 生圖規格】
+- 比例：9:16 直式商業構圖。
+- 主體 Prompt 語言：高品質英文描述 (High-end product photography, Studio lighting, 8k resolution)。
+- 畫面中文文字：繁體中文（如促銷標題、賣點文字）。
+- 必需包含 Negative Prompt，明確剔除人物、變形、多餘雜物與浮水印。
+
+【即夢 AI 2.5 影片規格】
+- Opening：完整商品正面置中，清晰展示品牌與外觀。
+- Middle：smooth slow push-in / dolly-in，細緻呈現材質與細節。
+- Motion & Lighting：平滑穩定的鏡頭運動、商業攝影棚光影、高對比焦點。
+- Ending：商品置中且 Ending freeze frame (定格結尾)。
 """
 
-SHOPEE_RULES = """
-【蝦皮高轉化內容規則】
-1. SEO 標題：品牌 + 商品名稱 + 核心特色 + 規格 + 熱門關鍵字。
-2. 五大賣點：使用 Emoji 標示，簡短有力，切中買家痛點。
-3. 完整商品描述：包含特色優勢、使用方式、適用對象與溫馨提示。
-4. 規格明細：條列容量、尺寸、產地等詳細資訊。
-5. 10~15 個熱門 Hashtag。
+SHOPEE_PROMPT_TEMPLATE = """
+【蝦皮高轉化上架文案要求】
+1. SEO 搜尋最佳化標題：包含「品牌/品名 + 核心功效 + 規格/適用對象 + 熱門關鍵字」，不超過 60 字。
+2. 5 大爆款賣點：簡短有力，解決買家痛點，善用 Emoji 標示。
+3. 完整商品描述：包含產品優勢、使用方法、適用對象、安心保障。
+4. 規格明細欄位：條列容量、產地、保存期限、材質等。
+5. 購買提醒與溫馨提示：包含出貨時間、售後服務政策。
+6. 熱門 Hashtag：10~15 個蝦皮熱搜標籤。
 """
 
-TIKTOK_RULES = """
-【TikTok / 短影音帶貨規則】
-1. 3 秒黃金 Hook：提供痛點型、好奇型、優惠型開頭。
-2. 15-30 秒口播帶貨腳本：節奏明快，具吸引力。
-3. 短文案 Caption 與強效 CTA (引導點擊購物車)。
-4. 爆款 Hashtag。
+TIKTOK_PROMPT_TEMPLATE = """
+【TikTok / 短影音帶貨文案要求】
+1. 3 秒黃金 Hook (吸睛開頭)：提供 3 種不同切入點 (痛點型、好奇型、促銷型)。
+2. 15-30 秒口播腳本：語速明快、口語化、具說服力與親和力。
+3. 貼文文案 (Caption)：精簡爆款文案，引導點擊購物車。
+4. 強力 CTA (行動呼籲)：促使立即下單的指令。
+5. 熱門 Hashtag：精選 TikTok / Reels 爆款標籤。
 """
 
 
-def create_master_prompt(product):
-    name = product.get("name", "")
-    price = product.get("price", "")
-    cost = product.get("cost", "")
-    commission = product.get("commission", "")
-    specs = product.get("specs", "")
+def build_master_prompt(product):
+    # 提取變數以確保語法解析安全
+    p_name = product.get("name", "")
+    p_price = product.get("price", "")
+    p_cost = product.get("cost", "")
+    p_comm = product.get("commission", "")
+    p_sales = product.get("sales", "")
+    p_rating = product.get("rating", "")
+    p_url = product.get("url", "")
+    p_specs = product.get("specs", "")
+    p_platform = product.get("platform", "")
 
     return f"""
-{BASE_AI_RULES}
+你現在是「{APP_NAME}」的核心電商 AI。
+請根據使用者提供的商品圖片與商品資料，嚴格產出以下內容：
 
+==============================
+【商品資料】
+==============================
+商品名稱: {p_name}
+商品價格: {p_price}
+商品成本: {p_cost}
+分潤比例: {p_comm}
+月銷量: {p_sales}
+商品評分: {p_rating}
+商品連結: {p_url}
+商品規格: {p_specs}
+目標平台: {p_platform}
+
+==============================
+【重要資料規則】
+==============================
+只能根據圖片與使用者提供的資料，不能自行捏造。不知道的資訊請寫「待確認」。
+
+==============================
+【任務一：商品辨識與 AI 選品分析】
+==============================
+1. 商品辨識（品名、分類、確定資訊、待確認資訊、主要賣點、目標客群）
+2. AI 選品分析（市場定位、優劣勢、短影音切入點、購買誘因、合規提醒）
+
+==============================
+【任務二：蝦皮高轉化上架文案】
+==============================
+{SHOPEE_PROMPT_TEMPLATE}
+
+==============================
+【任務三：TikTok 爆款帶貨文案】
+==============================
+{TIKTOK_PROMPT_TEMPLATE}
+
+==============================
+【任務四：即夢 AI 2.5 商業生圖 Prompt】
+==============================
+請遵循規範：
 {JIMENG_25_RULES}
 
-{SHOPEE_RULES}
-
-{TIKTOK_RULES}
-
-==============================
-【輸入商品資料】
-==============================
-商品名稱：{name}
-價格：{price}
-成本：{cost}
-分潤：{commission}
-規格：{specs}
+輸出格式：
+- 【即夢 AI 2.5 生圖英文 Prompt】
+- 【Negative Prompt】
+- 【畫面繁體中文文字設計】
+- 【9:16 構圖與光影建議】
 
 ==============================
-【請完整輸出以下項目】
+【任務五：即夢 AI 2.5 商業影片 Prompt】
 ==============================
-【一、商品辨識與資訊標記】
-【二、AI 選品與市場分析】
-【三、蝦皮 SEO 標題與高轉化文案】
-【四、五大商品爆款賣點】
-【五、完整蝦皮商品描述與規格】
-【六、TikTok 爆款帶貨腳本與 3 秒 Hook】
-【七、即夢 AI 2.5 商業生圖 Prompt (英文 + Negative Prompt + 中文海報字體)】
-【八、即夢 AI 2.5 商業影片 Prompt (9:16 直式鏡頭與光影軌跡)】
-【九、25 秒短影音爆款分鏡腳本】
-【十、分潤與合規檢查 (不確定者標示待確認)】
+輸出格式：
+- 【即夢 AI 2.5 影片英文 Prompt】(包含 Opening, Middle, Camera Motion, Lighting, Product Detail, Ending Freeze)
+- 【Negative Prompt】
+
+==============================
+【任務六：即夢 AI 2.5 爆款 25 秒帶貨分鏡腳本】
+==============================
+- 0~3 秒：黃金 Hook (吸引注意)
+- 3~8 秒：商品全貌與品質展示
+- 8~15 秒：核心賣點與細節特寫
+- 15~20 秒：使用情境與價值呈現
+- 20~25 秒：強力 CTA 與結尾定格
+
+==============================
+【任務七：分潤合規與最終檢查】
+==============================
+檢查資料是否精確、無虛構誇大，且完整符合即夢 2.5 規範。
 """
 
 
-# =====================================================
-# UI 頁面：登入 / 註冊
-# =====================================================
+# ============================================================
+# 頁面元件：登入頁
+# ============================================================
 
-def show_login_page():
-    st.title(f"🛒 {APP_NAME}")
-    st.caption("Gemini 2.5 + 即夢 AI 2.5 電商半自動化系統")
+def render_login_page():
+    st.markdown(
+        f"""
+        <div class="main-title">🛒 {APP_NAME}</div>
+        <div class="sub-title">永久會員｜管理員｜Gemini 2.5 Flash｜即夢 AI 2.5</div>
+        """,
+        unsafe_allow_html=True,
+    )
 
-    tab1, tab2 = st.tabs(["🔐 登入", "📝 註冊會員"])
+    login_tab, register_tab = st.tabs(["🔐 會員登入", "📝 會員註冊"])
 
-    with tab1:
-        username = st.text_input("帳號", key="login_user")
-        password = st.text_input("密碼", type="password", key="login_pwd")
+    with login_tab:
+        with st.form("login_form"):
+            username = st.text_input("會員帳號")
+            password = st.text_input("會員密碼", type="password")
+            submitted = st.form_submit_button("登入", use_container_width=True)
 
-        if st.button("登入", use_container_width=True, type="primary"):
-            if login_user(username, password):
-                st.success("登入成功！")
+        if submitted:
+            ok, message = login_user(username, password)
+            if ok:
+                st.success(message)
                 st.rerun()
             else:
-                st.error("帳號或密碼錯誤，或帳號已被停用。")
+                st.error(message)
 
-        st.info("預設管理員帳號：admin\n\n預設密碼：admin123456")
+        st.info("預設管理員帳號：admin / 密碼：admin123456")
 
-    with tab2:
-        new_username = st.text_input("新帳號", key="reg_user")
-        new_name = st.text_input("姓名 / 暱稱", key="reg_name")
-        new_password = st.text_input("新密碼", type="password", key="reg_pwd")
+    with register_tab:
+        with st.form("register_form"):
+            username = st.text_input("新會員帳號")
+            name = st.text_input("姓名 / 暱稱")
+            email = st.text_input("Email")
+            password = st.text_input("密碼", type="password")
+            password2 = st.text_input("再次輸入密碼", type="password")
+            submitted = st.form_submit_button("註冊永久會員", use_container_width=True)
 
-        if st.button("註冊會員", use_container_width=True):
-            ok, msg = register_user(new_username, new_password, new_name)
-            if ok:
-                st.success(msg)
+        if submitted:
+            if password != password2:
+                st.error("兩次密碼不一致。")
             else:
-                st.error(msg)
+                ok, message = create_member(username, password, name, email, "member")
+                if ok:
+                    st.success(message)
+                else:
+                    st.error(message)
 
 
-# =====================================================
-# UI 頁面：Sidebar
-# =====================================================
+# ============================================================
+# 頁面元件：Sidebar
+# ============================================================
 
-def show_sidebar():
+def render_sidebar():
     with st.sidebar:
-        st.title("👤 會員中心")
-        st.write(f"**使用者：** {st.session_state.name}")
-        st.write(f"**帳號：** {st.session_state.username}")
-        st.write(f"**權限：** {st.session_state.role.upper()}")
+        st.markdown(f"## 🛒 {APP_NAME}")
+        st.markdown(
+            f"""
+            <div class="member-card">
+            👤 <b>{st.session_state.name}</b><br>
+            帳號：{st.session_state.username}<br>
+            權限：{st.session_state.role}<br>
+            會員期限：<b>永久</b>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        if st.button("🏠 AI 自動化", use_container_width=True):
+            st.session_state.page = "home"
+            st.rerun()
+
+        if st.session_state.role == "admin":
+            if st.button("👑 管理員中心", use_container_width=True):
+                st.session_state.page = "admin"
+                st.rerun()
 
         st.divider()
 
-        if st.button("🏠 AI 分析主頁", use_container_width=True):
+        if st.button("🚪 登出", use_container_width=True):
+            logout_user()
+            st.rerun()
+
+
+# ============================================================
+# 頁面元件：管理員中心
+# ============================================================
+
+def render_admin_page():
+    st.title("👑 管理員中心")
+    st.caption("永久會員制：沒有到期日期，管理員可以手動啟用或停用。")
+
+    members = load_members()
+    total_members = len(members)
+    active_members = sum(1 for m in members if m.get("status") == "active")
+    admin_count = sum(1 for m in members if m.get("role") == "admin")
+
+    col1, col2, col3 = st.columns(3)
+    col1.metric("會員總數", total_members)
+    col2.metric("啟用會員", active_members)
+    col3.metric("管理員", admin_count)
+
+    st.divider()
+
+    st.subheader("➕ 建立永久會員")
+    with st.form("admin_create_member"):
+        col1, col2 = st.columns(2)
+        with col1:
+            username = st.text_input("會員帳號")
+            name = st.text_input("姓名 / 暱稱")
+        with col2:
+            password = st.text_input("會員密碼", type="password")
+            email = st.text_input("Email")
+
+        role = st.selectbox(
+            "會員等級",
+            ["member", "vip", "admin"],
+            format_func=lambda v: {"member": "一般會員", "vip": "VIP 會員", "admin": "管理員"}[v],
+        )
+
+        submitted = st.form_submit_button("建立永久會員", use_container_width=True)
+
+    if submitted:
+        ok, message = create_member(username, password, name, email, role)
+        if ok:
+            st.success(message)
+            st.rerun()
+        else:
+            st.error(message)
+
+    st.divider()
+
+    st.subheader("👥 會員管理")
+    members = load_members()
+
+    if not members:
+        st.info("目前沒有會員資料。")
+    else:
+        for idx, m in enumerate(members):
+            with st.expander(f"👤 {m.get('username')} ({m.get('name')}) - {m.get('role').upper()}"):
+                st.write(f"**Email:** {m.get('email', '無')}")
+                st.write(f"**狀態:** {m.get('status')}")
+                st.write(f"**建立時間:** {m.get('created_at')}")
+
+                if m.get("username") != ADMIN_USERNAME:
+                    btn_label = "停用帳號" if m.get("status") == "active" else "啟用帳號"
+                    if st.button(btn_label, key=f"toggle_{idx}"):
+                        m["status"] = "disabled" if m.get("status") == "active" else "active"
+                        save_members(members)
+                        st.success(f"已更新 {m.get('username')} 的狀態")
+                        st.rerun()
+
+
+# ============================================================
+# 頁面元件：AI 自動化主頁
+# ============================================================
+
+def render_home_page():
+    st.title(f"🛒 {APP_NAME}")
+    st.caption("一鍵產生蝦皮高轉化文案、TikTok 爆款腳本及即夢 AI 2.5 提示詞")
+
+    col_left, col_right = st.columns([1, 1])
+
+    with col_left:
+        st.subheader("1. 上傳商品圖片")
+        uploaded_file = st.file_uploader("選擇圖片 (JPG/PNG)", type=["jpg", "jpeg", "png"])
+
+        if uploaded_file:
+            st.image(uploaded_file, caption="預覽商品圖片", use_container_width=True)
+
+        st.subheader("2. 填寫商品資料")
+        product_name = st.text_input("商品名稱", placeholder="例如：極致保濕修護精華液")
+        product_price = st.text_input("商品售價", placeholder="例如：499")
+        product_cost = st.text_input("商品成本", placeholder="例如：150")
+        product_commission = st.text_input("分潤比例 (%)", placeholder="例如：15")
+        product_sales = st.text_input("預估月銷量", placeholder="例如：1000")
+        product_rating = st.text_input("商品評分", placeholder="例如：4.9")
+        product_url = st.text_input("商品連結", placeholder="例如：https://shopee.tw/...")
+        product_specs = st.text_area("商品規格/細節描述", placeholder="例如：容量 30ml，保存期限 3 年...")
+        platform = st.selectbox("主要目標平台", ["蝦皮購物 + TikTok", "僅蝦皮購物", "僅 TikTok"])
+
+        generate_btn = st.button("🚀 開始 AI 文案與提示詞生成", type="primary", use_container_width=True)
+
+    with col_right:
+        st.subheader("3. AI 分析與生成結果")
+
+        if generate_btn:
+            if not uploaded_file:
+                st.warning("請先上傳商品圖片。")
+            elif not product_name.strip():
+                st.warning("請輸入商品名稱。")
+            else:
+                with st.spinner("AI 正在分析圖片並為您撰寫蝦皮、TikTok 與即夢 2.5 提示詞中..."):
+                    try:
+                        img_bytes, mime_type = prepare_image(uploaded_file)
+                        product_data = {
+                            "name": product_name,
+                            "price": product_price,
+                            "cost": product_cost,
+                            "commission": product_commission,
+                            "sales": product_sales,
+                            "rating": product_rating,
+                            "url": product_url,
+                            "specs": product_specs,
+                            "platform": platform,
+                        }
+                        prompt = build_master_prompt(product_data)
+                        result = ask_gemini(prompt, img_bytes, mime_type)
+                        st.session_state.result = result
+                    except Exception as e:
+                        st.error(f"生成失敗：{e}")
+
+        if st.session_state.result:
+            st.markdown(st.session_state.result)
+            st.download_button(
+                label="📥 下載完整報告 (.txt)",
+                data=st.session_state.result,
+                file_name=f"{product_name}_AI電商報告.txt",
+                mime="text/plain",
+                use_container_width=True,
+            )
+
+
+# ============================================================
+# 主程式入口 (Main)
+# ============================================================
+
+def main():
+    ensure_admin()
+
+    if not st.session_state.logged_in:
+        render_login_page()
+    else:
+        render_sidebar(e_container_width=True):
             st.session_state.page = "home"
             st.rerun()
 
