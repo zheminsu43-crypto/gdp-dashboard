@@ -1,20 +1,30 @@
-import io
-import os
-import json
+import base64
 import hashlib
+import io
+import json
+import os
 import secrets
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
 
+import requests
 import streamlit as st
 from PIL import Image, ImageOps
 
+
 # ============================================================
-# 全域設定與路徑
+# 黑金剛 AI 商業智能平台
+# Streamlit + Ollama Cloud
+# 完全不使用 Gemini
 # ============================================================
 
-APP_NAME = "AI 蝦皮半自動化 2.5 PRO"
-GEMINI_MODEL = "gemini-2.5-flash"
+APP_NAME = "黑金剛 AI 商業智能平台"
+APP_VERSION = "3.0 PRO"
+
+DEFAULT_OLLAMA_URL = "https://ollama.com"
+
+ADMIN_USERNAME = "admin"
+DEFAULT_ADMIN_PASSWORD = "admin123456"
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
@@ -22,19 +32,1160 @@ MEMBERS_FILE = DATA_DIR / "members.json"
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-ADMIN_USERNAME = "admin"
-DEFAULT_ADMIN_PASSWORD = "admin123456"
 
 # ============================================================
-# Streamlit 頁面設定與 CSS 樣式
+# Streamlit 設定
 # ============================================================
 
 st.set_page_config(
     page_title=APP_NAME,
-    page_icon="🛒",
+    page_icon="🖤",
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+
+# ============================================================
+# CSS
+# ============================================================
+
+st.markdown(
+    """
+    <style>
+    .block-container {
+        max-width: 1400px;
+        padding-top: 1.2rem;
+        padding-bottom: 3rem;
+    }
+
+    .main-title {
+        font-size: 2.3rem;
+        font-weight: 800;
+        margin-bottom: 5px;
+    }
+
+    .sub-title {
+        color: #777;
+        margin-bottom: 20px;
+    }
+
+    .card {
+        border: 1px solid rgba(128,128,128,0.25);
+        border-radius: 16px;
+        padding: 20px;
+        margin-bottom: 15px;
+    }
+
+    @media (max-width: 768px) {
+        .main-title {
+            font-size: 1.7rem;
+        }
+
+        .block-container {
+            padding-left: 1rem;
+            padding-right: 1rem;
+        }
+
+        [data-testid="stHorizontalBlock"] {
+            flex-direction: column;
+        }
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+
+# ============================================================
+# Session State
+# ============================================================
+
+DEFAULT_SESSION = {
+    "logged_in": False,
+    "username": "",
+    "name": "",
+    "role": "",
+    "page": "🏠 AI 總控中心",
+    "ollama_url": DEFAULT_OLLAMA_URL,
+    "connection_ok": False,
+    "ollama_models": [],
+    "agent_messages": [],
+    "last_result": "",
+    "last_product_name": "",
+}
+
+
+for key, value in DEFAULT_SESSION.items():
+    if key not in st.session_state:
+        st.session_state[key] = value
+
+
+# ============================================================
+# Secrets / Environment
+# ============================================================
+
+def get_secret(name, default=""):
+    try:
+        value = st.secrets.get(name)
+
+        if value is not None:
+            return str(value).strip()
+
+    except Exception:
+        pass
+
+    return os.getenv(name, default).strip()
+
+
+def get_ollama_url():
+    url = st.session_state.get("ollama_url", "")
+
+    if not url:
+        url = get_secret(
+            "OLLAMA_URL",
+            DEFAULT_OLLAMA_URL,
+        )
+
+    url = str(url).strip()
+
+    if not url:
+        url = DEFAULT_OLLAMA_URL
+
+    return url.rstrip("/")
+
+
+def get_ollama_api_key():
+    return get_secret(
+        "OLLAMA_API_KEY",
+        "",
+    )
+
+
+# ============================================================
+# 密碼安全
+# ============================================================
+
+def hash_password(password, salt=None):
+    if salt is None:
+        salt = secrets.token_hex(16)
+
+    digest = hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        salt.encode("utf-8"),
+        200000,
+    ).hex()
+
+    return f"{salt}${digest}"
+
+
+def verify_password(password, stored_password):
+    try:
+        salt, saved_digest = stored_password.split("$", 1)
+
+        check_digest = hashlib.pbkdf2_hmac(
+            "sha256",
+            password.encode("utf-8"),
+            salt.encode("utf-8"),
+            200000,
+        ).hex()
+
+        return secrets.compare_digest(
+            check_digest,
+            saved_digest,
+        )
+
+    except Exception:
+        return False
+
+
+# ============================================================
+# 會員資料
+# ============================================================
+
+def load_members():
+    if not MEMBERS_FILE.exists():
+        return []
+
+    try:
+        data = json.loads(
+            MEMBERS_FILE.read_text(
+                encoding="utf-8"
+            )
+        )
+
+        if isinstance(data, list):
+            return data
+
+    except Exception:
+        pass
+
+    return []
+
+
+def save_members(members):
+    DATA_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    temp_file = MEMBERS_FILE.with_suffix(".tmp")
+
+    temp_file.write_text(
+        json.dumps(
+            members,
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    temp_file.replace(MEMBERS_FILE)
+
+
+def find_member(username):
+    username = username.strip()
+
+    for member in load_members():
+        if member.get("username") == username:
+            return member
+
+    return None
+
+
+def ensure_admin():
+    members = load_members()
+
+    for member in members:
+        if member.get("username") == ADMIN_USERNAME:
+            return
+
+    members.append(
+        {
+            "username": ADMIN_USERNAME,
+            "password_hash": hash_password(
+                DEFAULT_ADMIN_PASSWORD
+            ),
+            "name": "系統管理員",
+            "email": "admin@system.local",
+            "role": "admin",
+            "status": "active",
+            "membership": "永久",
+            "created_at": datetime.now().isoformat(
+                timespec="seconds"
+            ),
+        }
+    )
+
+    save_members(members)
+
+
+def create_member(
+    username,
+    password,
+    name,
+    email,
+    role="member",
+):
+    username = username.strip()
+
+    if not username:
+        return False, "請輸入帳號。"
+
+    if len(username) < 3:
+        return False, "帳號至少需要 3 個字元。"
+
+    if len(username) > 32:
+        return False, "帳號最多 32 個字元。"
+
+    allowed = (
+        "abcdefghijklmnopqrstuvwxyz"
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        "0123456789_.-"
+    )
+
+    if any(char not in allowed for char in username):
+        return (
+            False,
+            "帳號只能使用英數字、底線、點、連字號。",
+        )
+
+    if len(password) < 6:
+        return False, "密碼至少需要 6 個字元。"
+
+    if find_member(username):
+        return False, "這個帳號已存在。"
+
+    if role not in [
+        "member",
+        "vip",
+        "admin",
+    ]:
+        role = "member"
+
+    members = load_members()
+
+    members.append(
+        {
+            "username": username,
+            "password_hash": hash_password(password),
+            "name": name.strip() or username,
+            "email": email.strip(),
+            "role": role,
+            "status": "active",
+            "membership": "永久",
+            "created_at": datetime.now().isoformat(
+                timespec="seconds"
+            ),
+        }
+    )
+
+    save_members(members)
+
+    return True, "會員建立成功，永久會員權限已啟用。"
+
+
+def login_user(username, password):
+    member = find_member(username)
+
+    if member is None:
+        return False, "帳號或密碼錯誤。"
+
+    if not verify_password(
+        password,
+        member.get("password_hash", ""),
+    ):
+        return False, "帳號或密碼錯誤。"
+
+    if member.get("status") != "active":
+        return False, "此會員帳號目前已停用。"
+
+    st.session_state.logged_in = True
+    st.session_state.username = member.get(
+        "username",
+        "",
+    )
+    st.session_state.name = member.get(
+        "name",
+        username,
+    )
+    st.session_state.role = member.get(
+        "role",
+        "member",
+    )
+    st.session_state.page = "🏠 AI 總控中心"
+
+    return True, "登入成功。"
+
+
+def logout_user():
+    for key, value in DEFAULT_SESSION.items():
+        st.session_state[key] = value
+
+
+# ============================================================
+# Ollama Cloud
+# ============================================================
+
+def ollama_headers():
+    headers = {
+        "Content-Type": "application/json",
+    }
+
+    api_key = get_ollama_api_key()
+
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    return headers
+
+
+def ollama_get(endpoint, timeout=30):
+    url = f"{get_ollama_url()}{endpoint}"
+
+    response = requests.get(
+        url,
+        headers=ollama_headers(),
+        timeout=timeout,
+    )
+
+    response.raise_for_status()
+
+    return response
+
+
+def ollama_post(
+    endpoint,
+    payload,
+    timeout=300,
+):
+    url = f"{get_ollama_url()}{endpoint}"
+
+    response = requests.post(
+        url,
+        headers=ollama_headers(),
+        json=payload,
+        timeout=timeout,
+    )
+
+    response.raise_for_status()
+
+    return response
+
+
+def get_ollama_models():
+    response = ollama_get(
+        "/api/tags",
+        timeout=30,
+    )
+
+    data = response.json()
+
+    models = []
+
+    for item in data.get("models", []):
+        name = item.get("name")
+
+        if name:
+            models.append(name)
+
+    return models
+
+
+def test_ollama_connection():
+    api_key = get_ollama_api_key()
+
+    if not api_key:
+        raise RuntimeError(
+            "尚未設定 OLLAMA_API_KEY。"
+        )
+
+    models = get_ollama_models()
+
+    st.session_state.ollama_models = models
+    st.session_state.connection_ok = True
+
+    return models
+
+
+# ============================================================
+# Ollama Chat
+# ============================================================
+
+def ollama_chat(
+    model,
+    messages,
+    temperature=0.7,
+):
+    if not model:
+        raise RuntimeError(
+            "尚未選擇 AI 模型。"
+        )
+
+    payload = {
+        "model": model,
+        "messages": messages,
+        "stream": False,
+        "options": {
+            "temperature": temperature,
+        },
+    }
+
+    response = ollama_post(
+        "/api/chat",
+        payload,
+        timeout=300,
+    )
+
+    data = response.json()
+
+    message = data.get(
+        "message",
+        {},
+    )
+
+    content = message.get(
+        "content",
+        "",
+    )
+
+    if not content:
+        raise RuntimeError(
+            "Ollama 沒有回傳 AI 內容。"
+        )
+
+    return content.strip()
+
+
+# ============================================================
+# AI 核心規則
+# ============================================================
+
+SYSTEM_PROMPT = """
+你是「黑金剛 AI 商業智能平台」的核心 AI Agent。
+
+請使用繁體中文回答。
+
+主要工作：
+
+1. 電商商品分析
+2. 蝦皮商品文案
+3. TikTok 短影音
+4. 即夢 AI Prompt
+5. 商品行銷
+6. 商業策略
+7. AI 自動化
+8. 商品圖片分析
+9. 電商內容規劃
+
+資料規則：
+
+- 只能根據使用者提供的資料回答。
+- 不得虛構商品品牌。
+- 不得虛構商品規格。
+- 不得虛構價格。
+- 不得虛構認證。
+- 不得虛構功效。
+- 不得虛構銷量。
+- 不得虛構折扣。
+- 不知道的資訊必須標示「待確認」。
+- 不做沒有依據的醫療宣稱。
+- 文案要能直接使用。
+- 結果要清楚分段。
+"""
+
+
+def run_agent(
+    model,
+    prompt,
+    history=None,
+    image_bytes=None,
+):
+    messages = [
+        {
+            "role": "system",
+            "content": SYSTEM_PROMPT,
+        }
+    ]
+
+    if history:
+        messages.extend(history[-12:])
+
+    user_message = {
+        "role": "user",
+        "content": prompt,
+    }
+
+    if image_bytes:
+        user_message["images"] = [
+            base64.b64encode(
+                image_bytes
+            ).decode("utf-8")
+        ]
+
+    messages.append(user_message)
+
+    return ollama_chat(
+        model,
+        messages,
+    )
+
+
+# ============================================================
+# 圖片處理
+# ============================================================
+
+def prepare_image(uploaded_file):
+    raw = uploaded_file.getvalue()
+
+    image = Image.open(
+        io.BytesIO(raw)
+    )
+
+    image = ImageOps.exif_transpose(image)
+
+    if image.mode not in [
+        "RGB",
+        "RGBA",
+    ]:
+        image = image.convert("RGB")
+
+    max_size = 1600
+
+    if max(image.size) > max_size:
+        ratio = max_size / max(image.size)
+
+        new_size = (
+            max(
+                1,
+                int(image.width * ratio),
+            ),
+            max(
+                1,
+                int(image.height * ratio),
+            ),
+        )
+
+        image = image.resize(
+            new_size,
+            Image.Resampling.LANCZOS,
+        )
+
+    output = io.BytesIO()
+
+    if image.mode == "RGBA":
+        image.save(
+            output,
+            format="PNG",
+            optimize=True,
+        )
+    else:
+        image.save(
+            output,
+            format="JPEG",
+            quality=90,
+            optimize=True,
+        )
+
+    return output.getvalue()
+
+
+# ============================================================
+# 即夢 AI 2.5 核心規則
+# ============================================================
+
+JIMENG_RULES = """
+【即夢 AI 2.5 商品原貌鎖定】
+
+1. 使用原始商品作為主要商品。
+2. 保留品牌。
+3. 保留包裝。
+4. 保留 Logo。
+5. 保留商品文字。
+6. 保留原始顏色。
+7. 保留材質。
+8. 保留商品比例。
+9. 不重新設計商品。
+10. 不增加不存在的 Logo。
+11. 不虛構價格。
+12. 不虛構折扣。
+13. 不增加人物。
+14. 不增加手部。
+15. 不增加水印。
+16. 商品必須保持畫面焦點。
+17. 使用 9:16 直式構圖。
+18. 使用高品質商業攝影。
+19. 使用自然柔和光線。
+20. 使用緩慢推近。
+21. 可以使用微幅環繞。
+22. 強調商品細節特寫。
+"""
+
+
+# ============================================================
+# 商品分析 Prompt
+# ============================================================
+
+def product_prompt(
+    name,
+    category,
+    price,
+    cost,
+    selling_points,
+    platform,
+):
+    return f"""
+請分析以下電商商品。
+
+【商品名稱】
+{name}
+
+【分類】
+{category}
+
+【售價】
+{price}
+
+【成本】
+{cost}
+
+【商品賣點】
+{selling_points}
+
+【目標平台】
+{platform}
+
+==============================
+一、商品辨識
+==============================
+
+商品名稱：
+商品分類：
+主要商品：
+確定資訊：
+待確認資訊：
+
+==============================
+二、AI 選品分析
+==============================
+
+市場定位：
+目標客群：
+消費者需求：
+購買理由：
+競爭優勢：
+可能缺點：
+行銷切入點：
+
+==============================
+三、蝦皮高轉化文案
+==============================
+
+SEO 商品標題：
+提供 3 個版本。
+
+商品短描述：
+
+完整商品描述：
+
+核心賣點：
+至少 5 個。
+
+CTA：
+
+搜尋關鍵字：
+
+Hashtag：
+
+==============================
+四、TikTok 帶貨內容
+==============================
+
+3 秒黃金 Hook：
+提供 3 種。
+
+15 秒腳本：
+
+30 秒腳本：
+
+畫面：
+
+字幕：
+
+旁白：
+
+CTA：
+
+==============================
+五、即夢 AI 2.5 生圖 Prompt
+==============================
+
+{JIMENG_RULES}
+
+請輸出：
+
+英文生圖 Prompt：
+
+Negative Prompt：
+
+9:16 構圖：
+
+Lighting：
+
+==============================
+六、即夢 AI 2.5 商業影片 Prompt
+==============================
+
+Opening：
+
+Middle：
+
+Camera Motion：
+
+Lighting：
+
+Product Detail：
+
+Ending Freeze：
+
+Negative Prompt：
+
+==============================
+七、25 秒帶貨分鏡
+==============================
+
+0～3 秒：
+黃金 Hook。
+
+3～8 秒：
+商品全貌與品質展示。
+
+8～15 秒：
+核心賣點與細節特寫。
+
+15～20 秒：
+使用情境與價值呈現。
+
+20～25 秒：
+CTA 與結尾定格。
+
+==============================
+八、最終檢查
+==============================
+
+確認沒有虛構資料。
+
+資料不足的地方標示「待確認」。
+"""
+
+
+# ============================================================
+# 蝦皮 Prompt
+# ============================================================
+
+def shopee_prompt(
+    name,
+    category,
+    price,
+    selling_points,
+):
+    return f"""
+請製作蝦皮高轉化商品頁。
+
+商品名稱：
+{name}
+
+商品分類：
+{category}
+
+價格：
+{price}
+
+商品賣點：
+{selling_points}
+
+請輸出：
+
+【SEO 商品標題】
+提供 3 個版本。
+
+【商品短描述】
+
+【完整商品描述】
+
+【核心賣點】
+至少 5 個。
+
+【商品規格】
+
+【適合客群】
+
+【購買理由】
+
+【CTA】
+
+【搜尋關鍵字】
+
+【Hashtag】
+
+注意：
+
+不得虛構沒有提供的商品資訊。
+未知資訊標示「待確認」。
+"""
+
+
+# ============================================================
+# TikTok Prompt
+# ============================================================
+
+def tiktok_prompt(
+    name,
+    selling_points,
+):
+    return f"""
+請為商品「{name}」製作 TikTok 帶貨內容。
+
+商品賣點：
+
+{selling_points}
+
+請輸出：
+
+【3 秒黃金 Hook】
+提供 3 種。
+
+【15 秒腳本】
+
+【30 秒腳本】
+
+【分鏡】
+
+【字幕】
+
+【旁白】
+
+【CTA】
+
+【Hashtag】
+
+影片比例：
+9:16。
+
+不得虛構商品資訊。
+"""
+
+
+# ============================================================
+# 即夢 Prompt
+# ============================================================
+
+def jimeng_prompt(
+    name,
+    selling_points,
+):
+    return f"""
+請製作商品「{name}」的即夢 AI 2.5 商業影片 Prompt。
+
+商品賣點：
+
+{selling_points}
+
+{JIMENG_RULES}
+
+請輸出：
+
+【英文影片 Prompt】
+
+Opening：
+
+Middle：
+
+Camera Motion：
+
+Lighting：
+
+Product Detail：
+
+Ending Freeze：
+
+【Negative Prompt】
+
+影片長度：
+15～25 秒。
+
+影片比例：
+9:16。
+"""
+
+
+# ============================================================
+# 登入頁
+# ============================================================
+
+def render_login():
+    st.markdown(
+        f"""
+        <div class="main-title">
+        🖤 {APP_NAME}
+        </div>
+
+        <div class="sub-title">
+        Ollama Cloud + AI Agent + 電商自動化
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    login_tab, register_tab = st.tabs(
+        [
+            "🔐 會員登入",
+            "📝 註冊會員",
+        ]
+    )
+
+    with login_tab:
+        with st.form("login_form"):
+            username = st.text_input(
+                "會員帳號"
+            )
+
+            password = st.text_input(
+                "密碼",
+                type="password",
+            )
+
+            submit = st.form_submit_button(
+                "登入系統",
+                use_container_width=True,
+            )
+
+            if submit:
+                ok, message = login_user(
+                    username,
+                    password,
+                )
+
+                if ok:
+                    st.success(message)
+                    st.rerun()
+                else:
+                    st.error(message)
+
+        st.info(
+            f"預設管理員帳號：{ADMIN_USERNAME}"
+        )
+
+        st.info(
+            f"預設管理員密碼：{DEFAULT_ADMIN_PASSWORD}"
+        )
+
+    with register_tab:
+        with st.form("register_form"):
+            username = st.text_input(
+                "新帳號"
+            )
+
+            name = st.text_input(
+                "暱稱"
+            )
+
+            email = st.text_input(
+                "Email"
+            )
+
+            password1 = st.text_input(
+                "設定密碼",
+                type="password",
+            )
+
+            password2 = st.text_input(
+                "確認密碼",
+                type="password",
+            )
+
+            submit = st.form_submit_button(
+                "註冊永久會員",
+                use_container_width=True,
+            )
+
+            if submit:
+                if password1 != password2:
+                    st.error(
+                        "兩次密碼不一致。"
+                    )
+                else:
+                    ok, message = create_member(
+                        username,
+                        password1,
+                        name,
+                        email,
+                    )
+
+                    if ok:
+                        st.success(message)
+                    else:
+                        st.error(message)
+
+
+# ============================================================
+# Sidebar
+# ============================================================
+
+def render_sidebar():
+    with st.sidebar:
+        st.markdown(
+            f"## 🖤 {APP_NAME}"
+        )
+
+        st.caption(
+            f"版本：{APP_VERSION}"
+        )
+
+        st.divider()
+
+        st.write(
+            f"👤 **{st.session_state.name}**"
+        )
+
+        st.write(
+            f"帳號：{st.session_state.username}"
+        )
+
+        st.write(
+            f"權限：{st.session_state.role.upper()}"
+        )
+
+        st.write(
+            "會員期限：永久"
+        )
+
+        st.divider()
+
+        pages = [
+            "🏠 AI 總控中心",
+            "🤖 AI Agent",
+            "🛒 商品 AI",
+            "✍️ 蝦皮文案",
+            "🎵 TikTok",
+            "🎬 即夢 Prompt",
+            "⚙️ Ollama 設定",
+        ]
+
+        if st.session_state.role == "admin":
+            pages.append(
+                "👑 管理員中心"
+            )
+
+        current = st.session_state.page
+
+        if current not in pages:
+            current = pages[0]
+
+        selected = st.radio(
+            "功能選單",
+            pages,
+            index=pages.index(current),
+        )
+
+        st.session_state.page = selected
+
+        st.divider()
+
+        if st.session_state.connection_ok:
+            st.success(
+                "Ollama Cloud 已連線"
+            )
+        else:
+            st.warning(
+                "Ollama 尚未測試"
+            )
+
+        st.divider()
+
+        if st.button(
+            "🚪 安全登出",
+            use_container_width=True,
+        ):
+            logout_user()
+            st.rerun()
+
+
+# ============================================================
+# 首頁
+# ============================================================
+
+def render_home():
+    st.markdown(
+        f"""
+        <div class="main-title">
+        🖤 {APP_NAME}
+        </div>
+
+        <div class="sub-title">
+        Ollama Cloud 電商 AI 商業自動化中心
+        </div>
+ )
 
 st.markdown(
     """
