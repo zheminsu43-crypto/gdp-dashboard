@@ -1,5 +1,5 @@
 import streamlit as st
-import os, json, asyncio, requests
+import os, json, requests
 from google import genai
 
 # ==========================================
@@ -35,6 +35,67 @@ if st.button("🚀 一鍵生成影片", type="primary"):
         """
         res = client.models.generate_content(
             model='gemini-2.5-flash',
+            contents=prompt
+        )
+        
+        clean_text = res.text.replace("```json", "").replace("```", "").strip()
+        data = json.loads(clean_text)
+        script = data['script']
+        keyword = data['keyword']
+        
+        st.info(f"**生成文案：** {script}\n\n**背景關鍵字：** {keyword}")
+
+        # ------------------------------------------
+        # 步驟 B: 使用 Edge-TTS 生成真人配音
+        # ------------------------------------------
+        status.write("🎙️ 2/4 正在生成微軟真人語音配音...")
+        with open("script.txt", "w", encoding="utf-8") as f:
+            f.write(script)
+        os.system("edge-tts --file script.txt --voice zh-TW-HsiaoChenNeural --write-media audio.mp3")
+
+        # ------------------------------------------
+        # 步驟 C: 從 Pexels 抓取直式 HD 背景影片
+        # ------------------------------------------
+        status.write("🎥 3/4 正在從 Pexels 下載高畫質背景素材...")
+        headers = {"Authorization": PEXELS_KEY}
+        pexels_url = f"https://api.pexels.com/videos/search?query={keyword}&orientation=portrait&per_page=1"
+        response = requests.get(pexels_url, headers=headers).json()
+
+        # 安全備援：若搜不到指定關鍵字，改用預設素材
+        if not response.get('videos') or len(response['videos']) == 0:
+            pexels_url = "https://api.pexels.com/videos/search?query=nature&orientation=portrait&per_page=1"
+            response = requests.get(pexels_url, headers=headers).json()
+
+        video_file_url = response['videos'][0]['video_files'][0]['link']
+        video_data = requests.get(video_file_url).content
+        with open("bg.mp4", "wb") as f:
+            f.write(video_data)
+
+        # ------------------------------------------
+        # 步驟 D: 使用 FFmpeg 影音合成
+        # ------------------------------------------
+        status.write("⚙️ 4/4 正在渲染打包影音...")
+        os.system("ffmpeg -y -i bg.mp4 -i audio.mp3 -c:v copy -c:a aac -shortest output_reel.mp4")
+
+        status.update(label="🎉 影片渲染完成！", state="complete")
+
+        # ------------------------------------------
+        # 預覽與下載
+        # ------------------------------------------
+        st.subheader("📹 影片預覽")
+        st.video("output_reel.mp4")
+        
+        with open("output_reel.mp4", "rb") as file:
+            st.download_button(
+                label="⬇️ 下載 MP4 影片",
+                data=file,
+                file_name="output_reel.mp4",
+                mime="video/mp4"
+            )
+
+    except Exception as e:
+        status.update(label="❌ 製作過程發生錯誤", state="error")
+        st.error(f"錯誤細節：{e}")            model='gemini-2.5-flash',
             contents=prompt
         )
         
