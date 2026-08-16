@@ -1,81 +1,91 @@
+import os
+import json
+import requests
+import subprocess
 import streamlit as st
-import os, json, requests
 from google import genai
 
 # ==========================================
-# 1. 頁面基本設定與金鑰配置
+# 1. 頁面設定與 API 金鑰配置
 # ==========================================
-st.set_page_config(page_title="AI 短影音自動生成器", page_icon="🎬")
+st.set_page_config(page_title="AI 短影音自動生成器", page_icon="🎬", layout="centered")
 st.title("🎬 AI 短影音自動生成器")
 
 GEMINI_KEY = "AIzaSyBuQ8Hf8nKJKRLNS1pPTy_vNQNvtf6VvaQ"
 PEXELS_KEY = "WnUJedsHItVDgsi7jDVzCkLwk9pcIUflxxkdwfcTWF2wOLtSdVY88ucB"
 
 # ==========================================
-# 2. 使用者介面輸入
+# 2. 使用者輸入區域
 # ==========================================
 topic = st.text_input("請輸入短影音主題：", value="3個提升工作效率的心理學小技巧")
 
-if st.button("🚀 一鍵生成影片", type="primary"):
+if st.button("🚀 一鍵生成影片", type="primary", use_container_width=True):
     status = st.status("🎬 影片製作中，請稍候...", expanded=True)
     
     try:
         # ------------------------------------------
-        # 步驟 A: 呼叫 Gemini 2.5 Flash 生成腳本
+        # 步驟 A: 呼叫 Gemini 生成腳本
         # ------------------------------------------
         status.write("🤖 1/4 正在使用 Gemini 生成短影音文案與關鍵字...")
         client = genai.Client(api_key=GEMINI_KEY)
-        prompt = f"""
-        請針對主題『{topic}』寫一段 15 秒短影音口播文案。
-        必須回傳純 JSON 格式，不要加任何 Markdown 或其他文字：
-        {{
-          "script": "繁體中文口播文案（80字以內）",
-          "keyword": "1個英文搜尋關鍵字（例如 focus）"
-        }}
-        """
+        prompt = f"""請針對主題『{topic}』寫一段 15 秒短影音口播文案。
+必須回傳純 JSON 格式，不要加任何 Markdown 標記或額外文字：
+{{
+  "script": "繁體中文口播文案（80字以內）",
+  "keyword": "1個英文搜尋關鍵字（例如 focus）"
+}}"""
+        
         res = client.models.generate_content(
             model='gemini-2.5-flash',
             contents=prompt
         )
         
+        # 格式清洗與解析
         clean_text = res.text.replace("```json", "").replace("```", "").strip()
         data = json.loads(clean_text)
-        script = data['script']
-        keyword = data['keyword']
+        script = data.get("script", "")
+        keyword = data.get("keyword", "office")
         
         st.info(f"**生成文案：** {script}\n\n**背景關鍵字：** {keyword}")
 
         # ------------------------------------------
         # 步驟 B: 使用 Edge-TTS 生成真人配音
         # ------------------------------------------
-        status.write("🎙️ 2/4 正在生成微軟真人語音配音...")
+        status.write("🎙️ 2/4 正在生成微軟真人配音...")
         with open("script.txt", "w", encoding="utf-8") as f:
             f.write(script)
-        os.system("edge-tts --file script.txt --voice zh-TW-HsiaoChenNeural --write-media audio.mp3")
+        
+        subprocess.run(
+            ["edge-tts", "--file", "script.txt", "--voice", "zh-TW-HsiaoChenNeural", "--write-media", "audio.mp3"],
+            check=True
+        )
 
         # ------------------------------------------
-        # 步驟 C: 從 Pexels 抓取直式 HD 背景影片
+        # 步驟 C: 從 Pexels 下載背景素材
         # ------------------------------------------
-        status.write("🎥 3/4 正在從 Pexels 下載高畫質背景素材...")
+        status.write("🎥 3/4 正在從 Pexels 下載高畫質背景影片...")
         headers = {"Authorization": PEXELS_KEY}
         pexels_url = f"https://api.pexels.com/videos/search?query={keyword}&orientation=portrait&per_page=1"
-        response = requests.get(pexels_url, headers=headers).json()
+        res_pexels = requests.get(pexels_url, headers=headers).json()
 
-        # 安全備援：若搜不到指定關鍵字，改用預設素材
-        if not response.get('videos') or len(response['videos']) == 0:
+        # 安全備援：找不到搜尋關鍵字時改用預設素材
+        if not res_pexels.get("videos") or len(res_pexels["videos"]) == 0:
             pexels_url = "https://api.pexels.com/videos/search?query=nature&orientation=portrait&per_page=1"
-            response = requests.get(pexels_url, headers=headers).json()
+            res_pexels = requests.get(pexels_url, headers=headers).json()
 
-        video_file_url = response['videos'][0]['video_files'][0]['link']
-        video_data = requests.get(video_file_url).content
+        video_file_url = res_pexels["videos"][0]["video_files"][0]["link"]
+        video_bytes = requests.get(video_file_url).content
         with open("bg.mp4", "wb") as f:
-            f.write(video_data)
+            f.write(video_bytes)
 
         # ------------------------------------------
-        # 步驟 D: 使用 FFmpeg 影音合成
+        # 步驟 D: 使用 FFmpeg 進行影音合成
         # ------------------------------------------
-        status.write("⚙️ 4/4 正在渲染打包影音...")
-        os.system("ffmpeg -y -i bg.mp4 -i audio.mp3 -c:v copy -c:a aac -shortest output_reel.mp4")
+        status.write("⚙️ 4/4 正在進行影音渲染打包...")
+        subprocess.run(
+            ["ffmpeg", "-y", "-i", "bg.mp4", "-i", "audio.mp3", "-c:v", "copy", "-c:a", "aac", "-shortest", "output_reel.mp4"],
+            check=True
+        )
 
         status.update(label="🎉 影片渲染完成！", state="complete")
 
@@ -85,217 +95,18 @@ if st.button("🚀 一鍵生成影片", type="primary"):
         st.subheader("📹 影片預覽")
         st.video("output_reel.mp4")
         
-        with open("output_reel.mp4", "rb") as file:
+        with open("output_reel.mp4", "rb") as video_file:
             st.download_button(
                 label="⬇️ 下載 MP4 影片",
-                data=file,
+                data=video_file,
                 file_name="output_reel.mp4",
-                mime="video/mp4"
+                mime="video/mp4",
+                use_container_width=True
             )
 
     except Exception as e:
         status.update(label="❌ 製作過程發生錯誤", state="error")
-        st.error(f"錯誤細節：{e}")            model='gemini-2.5-flash',
-            contents=prompt
-        )
-        
-        clean_text = res.text.replace("```json", "").replace("```", "").strip()
-        data = json.loads(clean_text)
-        script = data['script']
-        keyword = data['keyword']
-        
-        st.info(f"**生成文案：** {script}\n\n**背景關鍵字：** {keyword}")
-
-        # ------------------------------------------
-        # 步驟 B: 使用 Edge-TTS 生成真人配音
-        # ------------------------------------------
-        status.write("🎙️ 2/4 正在生成微軟真人語音配音...")
-        
-        async def generate_audio():
-            import edge_tts
-            communicate = edge_tts.Communicate(script, "zh-TW-HsiaoChenNeural")
-            await communicate.save("audio.mp3")
-
-        asyncio.run(generate_audio())
-
-        # ------------------------------------------
-        # 步驟 C: 從 Pexels 抓取直式 HD 背景影片
-        # ------------------------------------------
-        status.write("🎥 3/4 正在從 Pexels 下載高畫質背景素材...")
-        headers = {"Authorization": PEXELS_KEY}
-        pexels_url = f"https://api.pexels.com/videos/search?query={keyword}&orientation=portrait&per_page=1"
-        response = requests.get(pexels_url, headers=headers).json()
-
-        # 安全備援：若搜不到指定關鍵字，改用預設素材
-        if not response.get('videos') or len(response['videos']) == 0:
-            pexels_url = "https://api.pexels.com/videos/search?query=nature&orientation=portrait&per_page=1"
-            response = requests.get(pexels_url, headers=headers).json()
-
-        video_file_url = response['videos'][0]['video_files'][0]['link']
-        video_data = requests.get(video_file_url).content
-        with open("bg.mp4", "wb") as f:
-            f.write(video_data)
-
-        # ------------------------------------------
-        # 步驟 D: 使用 FFmpeg 影音合成
-        # ------------------------------------------
-        status.write("⚙️ 4/4 正在渲染打包影音...")
-        os.system("ffmpeg -y -i bg.mp4 -i audio.mp3 -c:v copy -c:a aac -shortest output_reel.mp4")
-
-        status.update(label="🎉 影片渲染完成！", state="complete")
-
-        # ------------------------------------------
-        # 預覽與下載
-        # ------------------------------------------
-        st.subheader("📹 影片預覽")
-        st.video("output_reel.mp4")
-        
-        with open("output_reel.mp4", "rb") as file:
-            st.download_button(
-                label="⬇️ 下載 MP4 影片",
-                data=file,
-                file_name="output_reel.mp4",
-                mime="video/mp4"
-            )
-
-    except Exception as e:
-        status.update(label="❌ 製作過程發生錯誤", state="error")
-        st.error(f"錯誤細節：{e}"))
-
-st.markdown(
-    """
-    <style>
-    .main .block-container {
-        padding-top: 1.5rem;
-        padding-bottom: 2rem;
-    }
-    .biz-card {
-        background-color: #ffffff;
-        padding: 20px;
-        border-radius: 10px;
-        border: 1px solid #e2e8f0;
-        margin-bottom: 15px;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
-
-# ============================================================
-# Session 狀態初始化
-# ============================================================
-
-DEFAULT_SESSION = {
-    "logged_in": False,
-    "username": "",
-    "name": "",
-    "role": "",
-    "page": "home",
-    "result": "",
-}
-
-for key, value in DEFAULT_SESSION.items():
-    if key not in st.session_state:
-        st.session_state[key] = value
-
-# ============================================================
-# 會員密碼與資料管理 (JSON)
-# ============================================================
-
-def hash_password(password, salt=None):
-    if salt is None:
-        salt = secrets.token_hex(16)
-    digest = hashlib.pbkdf2_hmac(
-        "sha256",
-        password.encode("utf-8"),
-        salt.encode("utf-8"),
-        200000,
-    ).hex()
-    return f"{salt}${digest}"
-
-def verify_password(password, stored_password):
-    try:
-        salt, saved_digest = stored_password.split("$", 1)
-        check_digest = hashlib.pbkdf2_hmac(
-            "sha256",
-            password.encode("utf-8"),
-            salt.encode("utf-8"),
-            200000,
-        ).hex()
-        return secrets.compare_digest(check_digest, saved_digest)
-    except Exception:
-        return False
-
-def load_members():
-    if not MEMBERS_FILE.exists():
-        return []
-    try:
-        data = json.loads(MEMBERS_FILE.read_text(encoding="utf-8"))
-        if isinstance(data, list):
-            return data
-    except Exception:
-        return []
-    return []
-
-def save_members(members):
-    temp_file = MEMBERS_FILE.with_suffix(".tmp")
-    temp_file.write_text(
-        json.dumps(members, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    temp_file.replace(MEMBERS_FILE)
-
-def find_member(username):
-    username = username.strip()
-    for member in load_members():
-        if member.get("username") == username:
-            return member
-    return None
-
-def ensure_admin():
-    members = load_members()
-    admin = next((m for m in members if m.get("username") == ADMIN_USERNAME), None)
-    if admin is None:
-        members.append(
-            {
-                "username": ADMIN_USERNAME,
-                "password_hash": hash_password(DEFAULT_ADMIN_PASSWORD),
-                "name": "系統管理員",
-                "email": "admin@system.local",
-                "role": "admin",
-                "status": "active",
-                "membership": "永久",
-                "created_at": datetime.now().isoformat(timespec="seconds"),
-            }
-        )
-        save_members(members)
-
-def create_member(username, password, name, email, role="member"):
-    username = username.strip()
-    if not username:
-        return False, "請輸入會員帳號。"
-    if len(username) < 3 or len(username) > 32:
-        return False, "帳號長度需在 3 至 32 個字元之間。"
-
-    allowed_chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-"
-    if any(c not in allowed_chars for c in username):
-        return False, "帳號僅能使用英數字、底線、點與連字號。"
-
-    if len(password) < 6:
-        return False, "密碼長度至少需 6 個字元。"
-
-    if find_member(username) is not None:
-        return False, "該帳號已存在。"
-
-    if role not in ["member", "vip", "admin"]:
-        role = "member"
-
-    members = load_members()
-    members.append(
-        {
-            "username": username,
-            "password_hash": hash_password(password),
-            "name": name.strip() or username,
+        st.error(f"錯誤細節：{e}")name.strip() or username,
             "email": email.strip(),
             "role": role,
             "status": "active",
