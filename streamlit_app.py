@@ -4,37 +4,130 @@ import requests
 import subprocess
 import streamlit as st
 from google import genai
+from google.genai import types
+from pydantic import BaseModel, Field
 
-# ==========================================
-# 1. 頁面設定與 API 金鑰配置
-# ==========================================
+# 1. 頁面基本設定
 st.set_page_config(page_title="AI 短影音自動生成器", page_icon="🎬", layout="centered")
 st.title("🎬 AI 短影音自動生成器")
 
-GEMINI_KEY = "AIzaSyBuQ8Hf8nKJKRLNS1pPTy_vNQNvtf6VvaQ"
-PEXELS_KEY = "WnUJedsHItVDgsi7jDVzCkLwk9pcIUflxxkdwfcTWF2wOLtSdVY88ucB"
+# 建議將 Key 放入 Streamlit Secrets 或環境變數
+# 建立 .streamlit/secrets.toml：
+# GEMINI_KEY = "你的_GEMINI_KEY"
+# PEXELS_KEY = "你的_PEXELS_KEY"
+GEMINI_KEY = st.secrets.get("GEMINI_KEY", os.getenv("GEMINI_KEY", "YOUR_GEMINI_KEY"))
+PEXELS_KEY = st.secrets.get("PEXELS_KEY", os.getenv("PEXELS_KEY", "YOUR_PEXELS_KEY"))
 
-# ==========================================
-# 2. 使用者輸入區域
-# ==========================================
+# 定義 Gemini 輸出的資料格式
+class VideoScriptSchema(BaseModel):
+    script: str = Field(description="繁體中文口播文案，80字以內")
+    keyword: str = Field(description="1個適合用來搜尋直式背景影片的英文關鍵字")
+
+# 2. 主題輸入框
 topic = st.text_input("請輸入短影音主題：", value="3個提升工作效率的心理學小技巧")
 
+# 3. 按鈕啟動製作
 if st.button("🚀 一鍵生成影片", type="primary", use_container_width=True):
+    if not GEMINI_KEY or not PEXELS_KEY or "YOUR_" in GEMINI_KEY:
+        st.error("請先設定正確的 GEMINI_KEY 與 PEXELS_KEY！")
+        st.stop()
+
     status = st.status("🎬 影片製作中，請稍候...", expanded=True)
     
     try:
-        # ------------------------------------------
-        # 步驟 A: 呼叫 Gemini 生成腳本
-        # ------------------------------------------
-        status.write("🤖 1/4 正在使用 Gemini 生成短影音文案與關鍵字...")
+        # A. 呼叫 Gemini 生成文案
+        status.write("🤖 1/4 正在生成短影音文案...")
         client = genai.Client(api_key=GEMINI_KEY)
         
-        prompt = (
-            f"請針對主題『{topic}』寫一段 15 秒短影音口播文案。\n"
-            "必須回傳純 JSON 格式，不要加任何 Markdown 標記。\n"
-            "請包含 script（繁體中文口播文案，80字以內）與 keyword（1個英文搜尋關鍵字）欄位。\n"
-            '範例格式：{"script": "文案內容", "keyword": "focus"}'
+        prompt = f"請針對主題『{topic}』寫一段適合15秒短影音的口播文案。文案需簡潔有力、吸引人。"
+        
+        res = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=VideoScriptSchema
+            )
         )
+        
+        data = json.loads(res.text)
+        script = data.get("script", "")
+        keyword = data.get("keyword", "focus")
+        
+        st.info(f"**生成文案**：\n{script}\n\n**搜尋關鍵字**：`{keyword}`")
+
+        # B. 微軟 TTS 語音合成
+        status.write("🎙️ 2/4 正在生成語音...")
+        with open("script.txt", "w", encoding="utf-8") as f:
+            f.write(script)
+        
+        subprocess.run(
+            ["edge-tts", "--file", "script.txt", "--voice", "zh-TW-HsiaoChenNeural", "--write-media", "audio.mp3"],
+            check=True
+        )
+
+        # C. Pexels 背景素材下載
+        status.write("🎥 3/4 正在下載背景影片...")
+        headers = {"Authorization": PEXELS_KEY}
+        pexels_url = f"https://api.pexels.com/videos/search?query={keyword}&orientation=portrait&per_page=3"
+        res_pexels = requests.get(pexels_url, headers=headers).json()
+
+        videos = res_pexels.get("videos", [])
+        if not videos:
+            # 備用關鍵字搜尋
+            fallback_url = "https://api.pexels.com/videos/search?query=abstract+motion&orientation=portrait&per_page=1"
+            res_pexels = requests.get(fallback_url, headers=headers).json()
+            videos = res_pexels.get("videos", [])
+
+        if not videos:
+            raise Exception("無法從 Pexels 取得影片素材，請稍後再試。")
+
+        # 優先選擇 1080p 或 HD 畫質，避免下載過慢或畫質過低
+        video_files = videos[0].get("video_files", [])
+        selected_video = next(
+            (v for v in video_files if v.get("height") == 1920 or v.get("quality") == "hd"),
+            video_files[0]
+        )
+        
+        video_file_url = selected_video["link"]
+        video_bytes = requests.get(video_file_url).content
+        with open("bg.mp4", "wb") as f:
+            f.write(video_bytes)
+
+        # D. FFmpeg 影音渲染合成（加上 -stream_loop 避免影片太短）
+        status.write("⚙️ 4/4 正在合成影片...")
+        subprocess.run([
+            "ffmpeg", "-y",
+            "-stream_loop", "-1",          # 如果背景影片太短，自動無限循環
+            "-i", "bg.mp4",
+            "-i", "audio.mp3",
+            "-map", "0:v:0",               # 取第一個輸入的影像
+            "-map", "1:a:0",               # 取第二個輸入的音訊
+            "-c:v", "libx264",             # 重新編碼影像以確保畫面精準同步
+            "-preset", "ultrafast",        # 加快合成速度
+            "-c:a", "aac",
+            "-shortest",                   # 以音訊長度為準自動截斷
+            "output_reel.mp4"
+        ], check=True)
+
+        status.update(label="🎉 影片完成！", state="complete")
+
+        # 4. 影片預覽與下載
+        st.subheader("📹 影片預覽")
+        st.video("output_reel.mp4")
+        
+        with open("output_reel.mp4", "rb") as video_file:
+            st.download_button(
+                label="⬇️ 下載影片",
+                data=video_file,
+                file_name="output_reel.mp4",
+                mime="video/mp4",
+                use_container_width=True
+            )
+
+    except Exception as e:
+        status.update(label="❌ 製作發生錯誤", state="error")
+        st.error(f"錯誤細節：{e}")        )
         
         res = client.models.generate_content(
             model='gemini-2.5-flash',
