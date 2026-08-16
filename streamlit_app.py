@@ -11,14 +11,11 @@ from pydantic import BaseModel, Field
 st.set_page_config(page_title="AI 短影音自動生成器", page_icon="🎬", layout="centered")
 st.title("🎬 AI 短影音自動生成器")
 
-# 建議將 Key 放入 Streamlit Secrets 或環境變數
-# 建立 .streamlit/secrets.toml：
-# GEMINI_KEY = "你的_GEMINI_KEY"
-# PEXELS_KEY = "你的_PEXELS_KEY"
-GEMINI_KEY = st.secrets.get("GEMINI_KEY", os.getenv("GEMINI_KEY", "YOUR_GEMINI_KEY"))
-PEXELS_KEY = st.secrets.get("PEXELS_KEY", os.getenv("PEXELS_KEY", "YOUR_PEXELS_KEY"))
+# 讀取 API 金鑰
+GEMINI_KEY = st.secrets.get("GEMINI_KEY", os.getenv("GEMINI_KEY", ""))
+PEXELS_KEY = st.secrets.get("PEXELS_KEY", os.getenv("PEXELS_KEY", ""))
 
-# 定義 Gemini 輸出的資料格式
+# 定義 Gemini 輸出的結構化資料格式
 class VideoScriptSchema(BaseModel):
     script: str = Field(description="繁體中文口播文案，80字以內")
     keyword: str = Field(description="1個適合用來搜尋直式背景影片的英文關鍵字")
@@ -28,14 +25,14 @@ topic = st.text_input("請輸入短影音主題：", value="3個提升工作效�
 
 # 3. 按鈕啟動製作
 if st.button("🚀 一鍵生成影片", type="primary", use_container_width=True):
-    if not GEMINI_KEY or not PEXELS_KEY or "YOUR_" in GEMINI_KEY:
+    if not GEMINI_KEY or not PEXELS_KEY:
         st.error("請先設定正確的 GEMINI_KEY 與 PEXELS_KEY！")
         st.stop()
 
     status = st.status("🎬 影片製作中，請稍候...", expanded=True)
     
     try:
-        # A. 呼叫 Gemini 生成文案
+        # A. 呼叫 Gemini 生成文案與關鍵字
         status.write("🤖 1/4 正在生成短影音文案...")
         client = genai.Client(api_key=GEMINI_KEY)
         
@@ -51,7 +48,7 @@ if st.button("🚀 一鍵生成影片", type="primary", use_container_width=True
         )
         
         data = json.loads(res.text)
-        script = data.get("script", "")
+        script = data.get("script", "預設文案")
         keyword = data.get("keyword", "focus")
         
         st.info(f"**生成文案**：\n{script}\n\n**搜尋關鍵字**：`{keyword}`")
@@ -74,7 +71,6 @@ if st.button("🚀 一鍵生成影片", type="primary", use_container_width=True
 
         videos = res_pexels.get("videos", [])
         if not videos:
-            # 備用關鍵字搜尋
             fallback_url = "https://api.pexels.com/videos/search?query=abstract+motion&orientation=portrait&per_page=1"
             res_pexels = requests.get(fallback_url, headers=headers).json()
             videos = res_pexels.get("videos", [])
@@ -82,7 +78,6 @@ if st.button("🚀 一鍵生成影片", type="primary", use_container_width=True
         if not videos:
             raise Exception("無法從 Pexels 取得影片素材，請稍後再試。")
 
-        # 優先選擇 1080p 或 HD 畫質，避免下載過慢或畫質過低
         video_files = videos[0].get("video_files", [])
         selected_video = next(
             (v for v in video_files if v.get("height") == 1920 or v.get("quality") == "hd"),
@@ -94,19 +89,19 @@ if st.button("🚀 一鍵生成影片", type="primary", use_container_width=True
         with open("bg.mp4", "wb") as f:
             f.write(video_bytes)
 
-        # D. FFmpeg 影音渲染合成（加上 -stream_loop 避免影片太短）
+        # D. FFmpeg 影音渲染合成
         status.write("⚙️ 4/4 正在合成影片...")
         subprocess.run([
             "ffmpeg", "-y",
-            "-stream_loop", "-1",          # 如果背景影片太短，自動無限循環
+            "-stream_loop", "-1",
             "-i", "bg.mp4",
             "-i", "audio.mp3",
-            "-map", "0:v:0",               # 取第一個輸入的影像
-            "-map", "1:a:0",               # 取第二個輸入的音訊
-            "-c:v", "libx264",             # 重新編碼影像以確保畫面精準同步
-            "-preset", "ultrafast",        # 加快合成速度
+            "-map", "0:v:0",
+            "-map", "1:a:0",
+            "-c:v", "libx264",
+            "-preset", "ultrafast",
             "-c:a", "aac",
-            "-shortest",                   # 以音訊長度為準自動截斷
+            "-shortest",
             "output_reel.mp4"
         ], check=True)
 
@@ -127,154 +122,7 @@ if st.button("🚀 一鍵生成影片", type="primary", use_container_width=True
 
     except Exception as e:
         status.update(label="❌ 製作發生錯誤", state="error")
-        st.error(f"錯誤細節：{e}")        )
-        
-        res = client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=prompt
-        )
-        
-        # 格式清洗與解析
-        clean_text = res.text.replace("```json", "").replace("```", "").strip()
-        data = json.loads(clean_text)
-        script = data.get("script", "")
-        keyword = data.get("keyword", "office")
-        
-        st.info(f"**生成文案：** {script}\n\n**背景關鍵字：** {keyword}")
-
-        # ------------------------------------------
-        # 步驟 B: 使用 Edge-TTS 生成真人配音
-        # ------------------------------------------
-        status.write("🎙️ 2/4 正在生成微軟真人配音...")
-        with open("script.txt", "w", encoding="utf-8") as f:
-            f.write(script)
-        
-        subprocess.run(
-            ["edge-tts", "--file", "script.txt", "--voice", "zh-TW-HsiaoChenNeural", "--write-media", "audio.mp3"],
-            check=True
-        )
-
-        # ------------------------------------------
-        # 步驟 C: 從 Pexels 下載背景素材
-        # ------------------------------------------
-        status.write("🎥 3/4 正在從 Pexels 下載高畫質背景影片...")
-        headers = {"Authorization": PEXELS_KEY}
-        pexels_url = f"https://api.pexels.com/videos/search?query={keyword}&orientation=portrait&per_page=1"
-        res_pexels = requests.get(pexels_url, headers=headers).json()
-
-        # 安全備援：找不到搜尋關鍵字時改用預設素材
-        if not res_pexels.get("videos") or len(res_pexels["videos"]) == 0:
-            pexels_url = "https://api.pexels.com/videos/search?query=nature&orientation=portrait&per_page=1"
-            res_pexels = requests.get(pexels_url, headers=headers).json()
-
-        video_file_url = res_pexels["videos"][0]["video_files"][0]["link"]
-        video_bytes = requests.get(video_file_url).content
-        with open("bg.mp4", "wb") as f:
-            f.write(video_bytes)
-
-        # ------------------------------------------
-        # 步驟 D: 使用 FFmpeg 進行影音合成
-        # ------------------------------------------
-        status.write("⚙️ 4/4 正在進行影音渲染打包...")
-        subprocess.run(
-            ["ffmpeg", "-y", "-i", "bg.mp4", "-i", "audio.mp3", "-c:v", "copy", "-c:a", "aac", "-shortest", "output_reel.mp4"],
-            check=True
-        )
-
-        status.update(label="🎉 影片渲染完成！", state="complete")
-
-        # ------------------------------------------
-        # 預覽與下載
-        # ------------------------------------------
-        st.subheader("📹 影片預覽")
-        st.video("output_reel.mp4")
-        
-        with open("output_reel.mp4", "rb") as video_file:
-            st.download_button(
-                label="⬇️ 下載 MP4 影片",
-                data=video_file,
-                file_name="output_reel.mp4",
-                mime="video/mp4",
-                use_container_width=True
-            )
-
-    except Exception as e:
-        status.update(label="❌ 製作過程發生錯誤", state="error")
-        st.error(f"錯誤細節：{e}")te(f"👤 **{st.session_state.name}** ({st.session_state.role.upper()})")
-        st.caption("授權狀態：永久會員")
-
-        if st.button("🏠 電商自動化主頁", use_container_width=True):
-            st.session_state.page = "home"
-            st.rerun()
-
-        if st.session_state.role == "admin":
-            if st.button("👑 會員與系統管理", use_container_width=True):
-                st.session_state.page = "admin"
-                st.rerun()
-
-        st.divider()
-
-        if st.button("🚪 安全登出", use_container_width=True):
-            logout_user()
-            st.rerun()
-
-def render_admin_page():
-    st.title("👑 會員管理中心")
-    members = load_members()
-
-    c1, c2 = st.columns(2)
-    c1.metric("會員總數", len(members))
-    c2.metric("啟用中會員", sum(1 for m in members if m.get("status") == "active"))
-
-    st.divider()
-    st.subheader("➕ 手動新增會員")
-    with st.form("admin_create_form"):
-        u = st.text_input("帳號")
-        n = st.text_input("暱稱")
-        p = st.text_input("密碼", type="password")
-        e = st.text_input("Email")
-        r = st.selectbox("層級", ["member", "vip", "admin"])
-        if st.form_submit_button("新增會員", use_container_width=True):
-            ok, msg = create_member(u, p, n, e, r)
-            if ok:
-                st.success(msg)
-                st.rerun()
-            else:
-                st.error(msg)
-
-    st.divider()
-    st.subheader("👥 現有會員")
-    for idx, m in enumerate(members):
-        with st.expander(f"👤 {m.get('username')} ({m.get('name')})"):
-            st.write(f"角色：{m.get('role')} | 狀態：{m.get('status')}")
-            if m.get("username") != ADMIN_USERNAME:
-                is_act = m.get("status") == "active"
-                if st.button("停用" if is_act else "啟用", key=f"btn_{idx}"):
-                    m["status"] = "disabled" if is_act else "active"
-                    save_members(members)
-                    st.rerun()
-
-def render_home_page():
-    st.title(f"🛒 {APP_NAME}")
-    col1, col2 = st.columns([1, 1])
-
-    with col1:
-        st.subheader("1. 商品資訊輸入")
-        uploaded_file = st.file_uploader("上傳商品圖片 (JPG/PNG)", type=["jpg", "jpeg", "png"])
-        if uploaded_file:
-            st.image(uploaded_file, caption="預覽圖片", use_container_width=True)
-
-        p_name = st.text_input("商品名稱")
-        p_price = st.text_input("售價 (NTD)")
-        p_cost = st.text_input("成本 (NTD)")
-        p_comm = st.text_input("分潤比例 (%)")
-        p_sales = st.text_input("月銷量")
-        p_rating = st.text_input("評分")
-        p_url = st.text_input("商品連結")
-        p_specs = st.text_area("規格描述")
-        p_platform = st.selectbox("目標平台", ["蝦皮購物 + TikTok", "僅蝦皮購物", "僅 TikTok"])
-
-        gen_btn = st.button("🚀 開始生成文案報告", type="primary", use_container_width=True)
+        st.error(f"錯誤細節：{e}")st.button("🚀 開始生成文案報告", type="primary", use_container_width=True)
 
     with col2:
         st.subheader("2. AI 分析報告")
