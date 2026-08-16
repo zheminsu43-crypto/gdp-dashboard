@@ -1,40 +1,105 @@
-import io
-import os
-import json
-import hashlib
-import secrets
-from pathlib import Path
-from datetime import datetime
-
 import streamlit as st
-from PIL import Image, ImageOps
+import os, json, asyncio, requests
+from google import genai
 
-# ============================================================
-# 全域設定與路徑
-# ============================================================
+# ==========================================
+# 1. 頁面基本設定與金鑰配置
+# ==========================================
+st.set_page_config(page_title="AI 短影音自動生成器", page_icon="🎬")
+st.title("🎬 AI 短影音自動生成器")
 
-APP_NAME = "AI 蝦皮半自動化 2.5 PRO"
-GEMINI_MODEL = "gemini-2.5-flash"
+GEMINI_KEY = "AIzaSyBuQ8Hf8nKJKRLNS1pPTy_vNQNvtf6VvaQ"
+PEXELS_KEY = "WnUJedsHItVDgsi7jDVzCkLwk9pcIUflxxkdwfcTWF2wOLtSdVY88ucB"
 
-BASE_DIR = Path(__file__).resolve().parent
-DATA_DIR = BASE_DIR / "data"
-MEMBERS_FILE = DATA_DIR / "members.json"
+# ==========================================
+# 2. 使用者介面輸入
+# ==========================================
+topic = st.text_input("請輸入短影音主題：", value="3個提升工作效率的心理學小技巧")
 
-DATA_DIR.mkdir(parents=True, exist_ok=True)
+if st.button("🚀 一鍵生成影片", type="primary"):
+    status = st.status("🎬 影片製作中，請稍候...", expanded=True)
+    
+    try:
+        # ------------------------------------------
+        # 步驟 A: 呼叫 Gemini 2.5 Flash 生成腳本
+        # ------------------------------------------
+        status.write("🤖 1/4 正在使用 Gemini 生成短影音文案與關鍵字...")
+        client = genai.Client(api_key=GEMINI_KEY)
+        prompt = f"""
+        請針對主題『{topic}』寫一段 15 秒短影音口播文案。
+        必須回傳純 JSON 格式，不要加任何 Markdown 或其他文字：
+        {{
+          "script": "繁體中文口播文案（80字以內）",
+          "keyword": "1個英文搜尋關鍵字（例如 focus）"
+        }}
+        """
+        res = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=prompt
+        )
+        
+        clean_text = res.text.replace("```json", "").replace("```", "").strip()
+        data = json.loads(clean_text)
+        script = data['script']
+        keyword = data['keyword']
+        
+        st.info(f"**生成文案：** {script}\n\n**背景關鍵字：** {keyword}")
 
-ADMIN_USERNAME = "admin"
-DEFAULT_ADMIN_PASSWORD = "admin123456"
+        # ------------------------------------------
+        # 步驟 B: 使用 Edge-TTS 生成真人配音
+        # ------------------------------------------
+        status.write("🎙️ 2/4 正在生成微軟真人語音配音...")
+        
+        async def generate_audio():
+            import edge_tts
+            communicate = edge_tts.Communicate(script, "zh-TW-HsiaoChenNeural")
+            await communicate.save("audio.mp3")
 
-# ============================================================
-# Streamlit 頁面設定與 CSS 樣式
-# ============================================================
+        asyncio.run(generate_audio())
 
-st.set_page_config(
-    page_title=APP_NAME,
-    page_icon="🛒",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
+        # ------------------------------------------
+        # 步驟 C: 從 Pexels 抓取直式 HD 背景影片
+        # ------------------------------------------
+        status.write("🎥 3/4 正在從 Pexels 下載高畫質背景素材...")
+        headers = {"Authorization": PEXELS_KEY}
+        pexels_url = f"https://api.pexels.com/videos/search?query={keyword}&orientation=portrait&per_page=1"
+        response = requests.get(pexels_url, headers=headers).json()
+
+        # 安全備援：若搜不到指定關鍵字，改用預設素材
+        if not response.get('videos') or len(response['videos']) == 0:
+            pexels_url = "https://api.pexels.com/videos/search?query=nature&orientation=portrait&per_page=1"
+            response = requests.get(pexels_url, headers=headers).json()
+
+        video_file_url = response['videos'][0]['video_files'][0]['link']
+        video_data = requests.get(video_file_url).content
+        with open("bg.mp4", "wb") as f:
+            f.write(video_data)
+
+        # ------------------------------------------
+        # 步驟 D: 使用 FFmpeg 影音合成
+        # ------------------------------------------
+        status.write("⚙️ 4/4 正在渲染打包影音...")
+        os.system("ffmpeg -y -i bg.mp4 -i audio.mp3 -c:v copy -c:a aac -shortest output_reel.mp4")
+
+        status.update(label="🎉 影片渲染完成！", state="complete")
+
+        # ------------------------------------------
+        # 預覽與下載
+        # ------------------------------------------
+        st.subheader("📹 影片預覽")
+        st.video("output_reel.mp4")
+        
+        with open("output_reel.mp4", "rb") as file:
+            st.download_button(
+                label="⬇️ 下載 MP4 影片",
+                data=file,
+                file_name="output_reel.mp4",
+                mime="video/mp4"
+            )
+
+    except Exception as e:
+        status.update(label="❌ 製作過程發生錯誤", state="error")
+        st.error(f"錯誤細節：{e}"))
 
 st.markdown(
     """
