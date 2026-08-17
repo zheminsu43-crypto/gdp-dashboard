@@ -1,40 +1,885 @@
 import os
+import io
+import re
 import json
-import requests
+import uuid
+import shutil
+import hashlib
+import secrets
+import zipfile
 import subprocess
+from pathlib import Path
+from datetime import datetime, date, timedelta
+
 import streamlit as st
-from google import genai
-from google.genai import types
-from pydantic import BaseModel, Field
+from PIL import Image, ImageOps
 
-# 1. 頁面基本設定
-st.set_page_config(page_title="AI 短影音自動生成器", page_icon="🎬", layout="centered")
-st.title("🎬 AI 短影音自動生成器")
+# =========================================================
+# AI 蝦皮全自動化 2.5 PRO
+# =========================================================
+APP_NAME = "AI 蝦皮全自動化 2.5 PRO"
 
-# 讀取 API 金鑰
-GEMINI_KEY = st.secrets.get("GEMINI_KEY", os.getenv("GEMINI_KEY", ""))
-PEXELS_KEY = st.secrets.get("PEXELS_KEY", os.getenv("PEXELS_KEY", ""))
+DATA_DIR = Path("data")
+HISTORY_DIR = Path("history")
+MEDIA_DIR = DATA_DIR / "media"
+MEMBERS_FILE = DATA_DIR / "members.json"
 
-# 定義 Gemini 輸出的結構化資料格式
-class VideoScriptSchema(BaseModel):
-    script: str = Field(description="繁體中文口播文案，80字以內")
-    keyword: str = Field(description="1個適合用來搜尋直式背景影片的英文關鍵字")
+DATA_DIR.mkdir(exist_ok=True)
+HISTORY_DIR.mkdir(exist_ok=True)
+MEDIA_DIR.mkdir(exist_ok=True)
 
-# 2. 主題輸入框
-topic = st.text_input("請輸入短影音主題：", value="3個提升工作效率的心理學小技巧")
+MAX_IMAGE_SIZE = 1600
+MAX_IMAGE_MB = 20
+MAX_VIDEO_MB = 300
 
-# 3. 按鈕啟動製作
-if st.button("🚀 一鍵生成影片", type="primary", use_container_width=True):
-    if not GEMINI_KEY or not PEXELS_KEY:
-        st.error("請先設定正確的 GEMINI_KEY 與 PEXELS_KEY！")
-        st.stop()
+ADMIN_USERNAME = "admin"
+DEFAULT_MEMBER_DAYS = 30
 
-    status = st.status("🎬 影片製作中，請稍候...", expanded=True)
-    
+GEMINI_MODEL = "gemini-2.5-flash"
+
+VIDEO_MIME_MAP = {
+    ".mp4": "video/mp4",
+    ".mov": "video/quicktime",
+    ".webm": "video/webm",
+}
+
+# =========================================================
+# Streamlit 設定
+# =========================================================
+st.set_page_config(
+    page_title=APP_NAME,
+    page_icon="🛒",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+# =========================================================
+# CSS
+# =========================================================
+st.markdown(
+    """
+<style>
+.main-title {
+    font-size: 36px;
+    font-weight: 800;
+}
+.sub-title {
+    color: #777;
+    margin-bottom: 20px;
+}
+.card {
+    padding: 20px;
+    border-radius: 16px;
+    border: 1px solid rgba(128,128,128,.25);
+    margin-bottom: 15px;
+}
+.small {
+    color: #777;
+    font-size: 14px;
+}
+.success-box {
+    padding: 15px;
+    border-radius: 12px;
+    border: 1px solid #35a66f;
+}
+</style>
+""",
+    unsafe_allow_html=True,
+)
+
+# =========================================================
+# Session State
+# =========================================================
+DEFAULT_STATE = {
+    "logged_in": False,
+    "username": "",
+    "member": {},
+    "page": "Dashboard",
+    "analysis_result": {},
+    "last_product": {},
+    "last_image_bytes": None,
+    "last_image_name": "",
+    "last_video_bytes": None,
+    "last_video_name": "",
+    "last_video_mime": "video/mp4",
+    "last_zip_bytes": None,
+    "last_zip_name": "",
+    "last_history_id": "",
+    "gemini_model": GEMINI_MODEL,
+    "gemini_error": "",
+    "generated": False,
+}
+
+for key, value in DEFAULT_STATE.items():
+    if key not in st.session_state:
+        st.session_state[key] = value
+
+
+# =========================================================
+# Secrets / API
+# =========================================================
+def get_secret(name):
     try:
-        # A. 呼叫 Gemini 生成文案與關鍵字
-        status.write("🤖 1/4 正在生成短影音文案...")
-        client = genai.Client(api_key=GEMINI_KEY)
+        value = st.secrets.get(name, "")
+        if value:
+            return str(value)
+    except Exception:
+        pass
+
+    return os.environ.get(name, "")
+
+
+GEMINI_KEY = get_secret("GEMINI_KEY") or get_secret("GEMINI_API_KEY")
+PEXELS_KEY = get_secret("PEXELS_KEY")
+
+
+# =========================================================
+# 基礎工具
+# =========================================================
+def now_text():
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def today():
+    return date.today()
+
+
+def hash_password(password):
+    return hashlib.sha256(password.encode("utf-8")).hexdigest()
+
+
+def safe_filename(name):
+    name = str(name or "file")
+    name = re.sub(r'[\\/:*?"<>|]+', "_", name)
+    return name[:100]
+
+
+def load_json(path, default):
+    try:
+        if not path.exists():
+            return default
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return default
+
+
+def save_json(path, data):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.with_suffix(".tmp")
+
+    with open(temp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+    temp.replace(path)
+
+
+def load_members():
+    members = load_json(MEMBERS_FILE, {})
+
+    if not isinstance(members, dict):
+        members = {}
+
+    return members
+
+
+def save_members(members):
+    save_json(MEMBERS_FILE, members)
+
+
+# =========================================================
+# 初始化 Admin
+# =========================================================
+def ensure_admin():
+    members = load_members()
+
+    if ADMIN_USERNAME not in members:
+        members[ADMIN_USERNAME] = {
+            "username": ADMIN_USERNAME,
+            "password_hash": hash_password("admin123"),
+            "created_at": now_text(),
+            "expire_date": None,
+            "permanent": True,
+            "role": "admin",
+            "status": "active",
+        }
+
+        save_members(members)
+
+
+ensure_admin()
+
+
+# =========================================================
+# 會員
+# =========================================================
+def member_expiration(member):
+    if member.get("permanent"):
+        return "永久會員", True
+
+    expire = member.get("expire_date")
+
+    if not expire:
+        return "未設定", False
+
+    try:
+        expire_date = date.fromisoformat(expire)
+    except Exception:
+        return "日期錯誤", False
+
+    days = (expire_date - today()).days
+
+    if days < 0:
+        return f"已到期 ({abs(days)} 天)", False
+
+    if days <= 7:
+        return f"即將到期（剩 {days} 天）", True
+
+    return f"正常（剩 {days} 天）", True
+
+
+def create_member(username, password, days=30, permanent=False, role="member"):
+    username = username.strip()
+
+    if not username or not password:
+        return False, "帳號與密碼不能為空。"
+
+    members = load_members()
+
+    if username in members:
+        return False, "帳號已存在。"
+
+    expire_date = None
+
+    if not permanent:
+        expire_date = (today() + timedelta(days=int(days))).isoformat()
+
+    members[username] = {
+        "username": username,
+        "password_hash": hash_password(password),
+        "created_at": now_text(),
+        "expire_date": expire_date,
+        "permanent": permanent,
+        "role": role,
+        "status": "active",
+    }
+
+    save_members(members)
+
+    return True, "會員建立成功。"
+
+
+def authenticate(username, password):
+    members = load_members()
+
+    member = members.get(username)
+
+    if not member:
+        return None, "帳號不存在。"
+
+    if member.get("status") != "active":
+        return None, "此帳號目前已停用。"
+
+    if member.get("password_hash") != hash_password(password):
+        return None, "密碼錯誤。"
+
+    status, valid = member_expiration(member)
+
+    if not valid:
+        return None, f"會員已無法使用：{status}"
+
+    return member, ""
+
+
+# =========================================================
+# Gemini
+# =========================================================
+def get_gemini_client():
+    if not GEMINI_KEY:
+        return None
+
+    try:
+        from google import genai
+
+        return genai.Client(api_key=GEMINI_KEY)
+    except Exception as e:
+        st.session_state.gemini_error = str(e)
+        return None
+
+
+def clean_json_text(text):
+    if not text:
+        return ""
+
+    text = text.strip()
+
+    text = re.sub(r"^```json", "", text, flags=re.I)
+    text = re.sub(r"^```", "", text)
+    text = re.sub(r"```$", "", text)
+
+    return text.strip()
+
+
+def gemini_text(prompt, image_bytes=None, mime_type="image/jpeg"):
+    client = get_gemini_client()
+
+    if not client:
+        raise RuntimeError(
+            "找不到 Gemini API Key。請在 Streamlit Secrets 設定 GEMINI_KEY。"
+        )
+
+    try:
+        contents = []
+
+        if image_bytes:
+            from google.genai import types
+
+            contents.append(
+                types.Part.from_bytes(
+                    data=image_bytes,
+                    mime_type=mime_type,
+                )
+            )
+
+        contents.append(prompt)
+
+        response = client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=contents,
+        )
+
+        text = getattr(response, "text", None)
+
+        if not text:
+            raise RuntimeError("Gemini 沒有返回內容。")
+
+        st.session_state.gemini_model = GEMINI_MODEL
+
+        return text
+
+    except Exception as e:
+        error = str(e)
+
+        if "404" in error:
+            error = "Gemini 模型不存在或目前 API 不支援此模型（404）。"
+        elif "401" in error:
+            error = "Gemini API Key 無效（401）。"
+        elif "403" in error:
+            error = "Gemini API 權限不足（403）。"
+        elif "429" in error:
+            error = "Gemini API 額度或頻率限制（429）。"
+        elif "400" in error:
+            error = "Gemini 請求格式錯誤（400）。"
+
+        st.session_state.gemini_error = error
+        raise RuntimeError(error)
+
+
+def gemini_json(prompt, image_bytes=None, mime_type="image/jpeg"):
+    text = gemini_text(
+        prompt,
+        image_bytes=image_bytes,
+        mime_type=mime_type,
+    )
+
+    cleaned = clean_json_text(text)
+
+    try:
+        return json.loads(cleaned)
+    except Exception:
+        # 嘗試找 JSON 區塊
+        match = re.search(r"\{.*\}", cleaned, re.S)
+
+        if match:
+            try:
+                return json.loads(match.group(0))
+            except Exception:
+                pass
+
+        raise RuntimeError("Gemini 回傳內容不是有效 JSON。")
+
+
+# =========================================================
+# 圖片處理
+# =========================================================
+def process_image(uploaded_file):
+    if not uploaded_file:
+        return None, None
+
+    raw = uploaded_file.getvalue()
+
+    if len(raw) > MAX_IMAGE_MB * 1024 * 1024:
+        raise ValueError(f"圖片超過 {MAX_IMAGE_MB}MB。")
+
+    image = Image.open(io.BytesIO(raw))
+
+    image = ImageOps.exif_transpose(image)
+
+    if image.mode not in ("RGB", "RGBA"):
+        image = image.convert("RGB")
+
+    image.thumbnail(
+        (MAX_IMAGE_SIZE, MAX_IMAGE_SIZE),
+        Image.Resampling.LANCZOS,
+    )
+
+    output = io.BytesIO()
+
+    if image.mode == "RGBA":
+        image.save(output, format="PNG")
+        mime = "image/png"
+    else:
+        image.save(
+            output,
+            format="JPEG",
+            quality=92,
+        )
+        mime = "image/jpeg"
+
+    return output.getvalue(), mime
+
+
+# =========================================================
+# 商品分類
+# =========================================================
+def detect_category(text):
+    text = (text or "").lower()
+
+    categories = {
+        "保養美妝": [
+            "洗面",
+            "面膜",
+            "乳液",
+            "精華",
+            "保養",
+            "化妝",
+            "美容",
+            "防曬",
+        ],
+        "3C": [
+            "手機",
+            "耳機",
+            "充電",
+            "電腦",
+            "鍵盤",
+            "滑鼠",
+            "3c",
+            "平板",
+        ],
+        "居家生活": [
+            "收納",
+            "清潔",
+            "家居",
+            "廚房",
+            "杯",
+            "居家",
+        ],
+        "服飾": [
+            "衣服",
+            "褲",
+            "鞋",
+            "帽",
+            "包",
+            "服飾",
+        ],
+        "食品": [
+            "食品",
+            "零食",
+            "餅乾",
+            "飲料",
+            "茶",
+            "咖啡",
+        ],
+        "汽機車": [
+            "汽車",
+            "機車",
+            "車用",
+            "汽機車",
+        ],
+    }
+
+    for category, keywords in categories.items():
+        if any(keyword in text for keyword in keywords):
+            return category
+
+    return "其他"
+
+
+# =========================================================
+# Gemini 完整商品分析
+# =========================================================
+def run_product_ai(product):
+    prompt = f"""
+你現在是「AI 蝦皮全自動化 2.5 PRO」電商 AI。
+
+請分析以下商品，並產生完整電商行銷資料。
+
+商品資料：
+商品名稱：{product['name']}
+分類：{product['category']}
+價格：{product['price']}
+商品特色：{product['features']}
+商品賣點：{product['selling_points']}
+
+重要規則：
+
+1. 如果有商品圖片，圖片是商品外觀的主要依據。
+2. 不得虛構圖片中不存在的品牌、Logo、文字、功能、配件。
+3. 不得自行修改商品外觀。
+4. 不得虛構價格、折扣、贈品。
+5. 如果資訊不足，明確標示「未確認」。
+6. 所有內容使用繁體中文。
+7. 蝦皮標題要自然，不要塞滿無意義關鍵字。
+8. TikTok 必須前 3 秒有 Hook。
+9. 即夢 Prompt 必須保護商品一致性。
+10. 影片預設 9:16。
+
+請只回傳 JSON：
+
+{{
+  "product_analysis": {{
+    "basic": "",
+    "appearance": "",
+    "material": "",
+    "color": "",
+    "packaging": "",
+    "logo_text": "",
+    "features": []
+  }},
+  "selling_points": [],
+  "target_audience": [],
+  "consumer_needs": [],
+  "market_positioning": "",
+  "purchase_reasons": [],
+  "advantages": [],
+  "disadvantages": [],
+  "risks": [],
+  "selection_score": 0,
+  "market_attractiveness": 0,
+  "visual_attractiveness": 0,
+  "short_video_score": 0,
+  "tiktok_score": 0,
+  "shopee_score": 0,
+  "selling_direction": "",
+  "shopee": {{
+    "title": "",
+    "description": "",
+    "selling_points": [],
+    "keywords": [],
+    "long_tail_keywords": []
+  }},
+  "tiktok": {{
+    "title": "",
+    "hook": "",
+    "copy": "",
+    "hashtags": [],
+    "script_15": "",
+    "script_30": ""
+  }},
+  "jimeng": {{
+    "image_prompt": "",
+    "cover_prompt": "",
+    "video_prompt_15": "",
+    "video_prompt_30": ""
+  }}
+}}
+"""
+
+    return gemini_json(
+        prompt,
+        image_bytes=product.get("image_bytes"),
+        mime_type=product.get("image_mime", "image/jpeg"),
+    )
+
+
+# =========================================================
+# 本機 fallback
+# =========================================================
+def local_fallback(product):
+    category = product["category"]
+
+    name = product["name"]
+
+    return {
+        "product_analysis": {
+            "basic": f"{name}，分類：{category}",
+            "appearance": "請以商品原圖為準",
+            "material": "未確認",
+            "color": "請以商品原圖為準",
+            "packaging": "請以商品原圖為準",
+            "logo_text": "請以商品原圖為準",
+            "features": [product["features"]],
+        },
+        "selling_points": [product["selling_points"]],
+        "target_audience": ["對此類商品有需求的消費者"],
+        "consumer_needs": ["便利性", "實用性", "商品特色"],
+        "market_positioning": "實用型電商商品",
+        "purchase_reasons": ["商品特色", "使用便利"],
+        "advantages": ["適合短影音展示"],
+        "disadvantages": ["缺少實際市場數據"],
+        "risks": ["AI 分析不能取代實際市場測試"],
+        "selection_score": 75,
+        "market_attractiveness": 75,
+        "visual_attractiveness": 75,
+        "short_video_score": 80,
+        "tiktok_score": 78,
+        "shopee_score": 80,
+        "selling_direction": "以商品特色、實際使用情境與視覺展示為主要行銷方向。",
+        "shopee": {
+            "title": f"{name}｜高質感實用好物",
+            "description": f"✨ {name}\n\n{product['features']}\n\n推薦給需要此類商品的消費者。",
+            "selling_points": [
+                product["selling_points"],
+                product["features"],
+            ],
+            "keywords": [name, category],
+            "long_tail_keywords": [
+                f"{name}推薦",
+                f"{category}好物",
+            ],
+        },
+        "tiktok": {
+            "title": f"{name}實用好物推薦",
+            "hook": f"如果你正在找 {name}，這個一定要看！",
+            "copy": f"今天分享一個實用好物：{name}。",
+            "hashtags": [
+                "#TikTok",
+                "#好物推薦",
+                "#生活好物",
+                "#蝦皮",
+            ],
+            "script_15": (
+                f"前3秒：你還在找好用的{category}嗎？\n"
+                f"接著展示{name}。\n"
+                f"快速介紹商品特色。\n"
+                f"最後：想了解更多可以到賣場看看。"
+            ),
+            "script_30": (
+                f"開場：你還在找實用的{category}嗎？\n"
+                f"展示：這款{name}。\n"
+                f"特色：{product['features']}。\n"
+                f"賣點：{product['selling_points']}。\n"
+                f"結尾：如果剛好有需求，可以進一步了解。"
+            ),
+        },
+        "jimeng": {
+            "image_prompt": (
+                f"使用上傳商品圖片作為唯一商品外觀依據，"
+                f"保持{name}原始品牌、Logo、包裝、顏色、"
+                f"材質、比例、形狀與文字完全一致。"
+                f"高級商業商品攝影，乾淨背景，自然光，"
+                f"9:16 電商視覺。禁止修改商品。"
+            ),
+            "cover_prompt": (
+                f"以原商品圖片為唯一商品依據，製作高級電商封面，"
+                f"商品外觀完全保持原樣，不修改Logo、文字、顏色、"
+                f"包裝與比例，9:16。"
+            ),
+            "video_prompt_15": (
+                f"9:16 直式15秒商品廣告。"
+                f"使用原商品圖片作為唯一商品依據。"
+                f"商品外觀完全保持一致。"
+                f"高級商業攝影、自然光、慢速推鏡、"
+                f"商品特寫、輕微環繞。禁止改品牌、Logo、"
+                f"包裝、顏色、比例、文字或增加不存在的物件。"
+            ),
+            "video_prompt_30": (
+                f"9:16 直式30秒商品廣告。"
+                f"以原商品圖片為唯一依據。"
+                f"開場商品特寫，中段展示商品細節與使用情境，"
+                f"結尾高級產品英雄鏡頭。"
+                f"保持商品外觀、品牌、Logo、包裝、文字、"
+                f"顏色、材質與比例完全一致。"
+                f"禁止虛構商品資訊。"
+            ),
+        },
+    }
+
+
+# =========================================================
+# Edge TTS
+# =========================================================
+def edge_tts_available():
+    return shutil.which("edge-tts") is not None
+
+
+def create_tts(text, output_path):
+    if not edge_tts_available():
+        raise RuntimeError(
+            "找不到 edge-tts。請確認 requirements.txt 已安裝 edge-tts。"
+        )
+
+    subprocess.run(
+        [
+            "edge-tts",
+            "--text",
+            text,
+            "--voice",
+            "zh-TW-HsiaoChenNeural",
+            "--write-media",
+            str(output_path),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+# =========================================================
+# Pexels
+# =========================================================
+def download_pexels_video(keyword, output_path):
+    if not PEXELS_KEY:
+        raise RuntimeError("未設定 PEXELS_KEY。")
+
+    import requests
+
+    headers = {
+        "Authorization": PEXELS_KEY,
+    }
+
+    url = "https://api.pexels.com/videos/search"
+
+    params = {
+        "query": keyword,
+        "orientation": "portrait",
+        "per_page": 5,
+    }
+
+    response = requests.get(
+        url,
+        headers=headers,
+        params=params,
+        timeout=30,
+    )
+
+    response.raise_for_status()
+
+    data = response.json()
+
+    videos = data.get("videos", [])
+
+    if not videos:
+        params["query"] = "product commercial"
+
+        response = requests.get(
+            url,
+            headers=headers,
+            params=params,
+            timeout=30,
+        )
+
+        response.raise_for_status()
+
+        videos = response.json().get("videos", [])
+
+    if not videos:
+        raise RuntimeError("Pexels 找不到適合的影片素材。")
+
+    video_files = videos[0].get("video_files", [])
+
+    if not video_files:
+        raise RuntimeError("Pexels 影片沒有可下載檔案。")
+
+    # 優先挑直式/高畫質
+    video_files = sorted(
+        video_files,
+        key=lambda x: (
+            x.get("width", 0) * x.get("height", 0)
+        ),
+        reverse=True,
+    )
+
+    video_url = video_files[0]["link"]
+
+    video_response = requests.get(
+        video_url,
+        timeout=120,
+    )
+
+    video_response.raise_for_status()
+
+    output_path.write_bytes(video_response.content)
+
+    return output_path
+
+
+# =========================================================
+# FFmpeg
+# =========================================================
+def ffmpeg_available():
+    return shutil.which("ffmpeg") is not None
+
+
+def create_video(background, audio, output):
+    if not ffmpeg_available():
+        raise RuntimeError(
+            "找不到 FFmpeg。Streamlit Cloud 需要另外設定 FFmpeg。"
+        )
+
+    command = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(background),
+        "-i",
+        str(audio),
+        "-vf",
+        (
+            "scale=1080:1920:"
+            "force_original_aspect_ratio=increase,"
+            "crop=1080:1920"
+        ),
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "23",
+        "-c:a",
+        "aac",
+        "-shortest",
+        "-movflags",
+        "+faststart",
+        str(output),
+    ]
+
+    subprocess.run(
+        command,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    return output
+
+
+# =========================================================
+# 歷史紀錄
+# =========================================================
+def save_history(product, result):
+    history_id = (
+        datetime.now().strftime("%Y%m%d_%H%M%S")
+        + "_"
+        + secrets.token_hex(3)
+    )
+
+    folder = HISTORY_DIR / history_id
+    folder.mkdir(parents=True, exist_ok=True)
+
+    product_copy = dict(product)
+
+    # bytes 不寫進 JSON
+    product_copy.pop("image_bytes", None)
+
+    save_json(
+        folder / "product.json",
+        product_copy,
+    )
+
+    save_json(
+        folder / "ai_result.json",
+        r        client = genai.Client(api_key=GEMINI_KEY)
         
         prompt = f"請針對主題『{topic}』寫一段適合15秒短影音的口播文案。文案需簡潔有力、吸引人。"
         
