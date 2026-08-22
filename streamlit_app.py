@@ -75,7 +75,6 @@ def call_gemini_ai():
         client = genai.Client(api_key=api_key)
         contents = []
 
-        # 處理圖片傳送給 Gemini 進行多模態分析
         if st.session_state.images:
             img = Image.open(st.session_state.images[0])
             contents.append(img)
@@ -103,9 +102,8 @@ def call_gemini_ai():
             )
             text = response.text
 
-            # 解析回答
             results = {}
-            current_tag = "分析"
+            current_tag = "analysis"
             for line in text.split("\n"):
                 if "[AI分析]" in line: current_tag = "analysis"
                 elif "[商品標題]" in line: current_tag = "title"
@@ -190,6 +188,186 @@ def dashboard():
             st.markdown(f'<div class="metric"><div style="font-size:23px">{icon}</div><div class="metric-label">{label}</div><div class="metric-value">{value}</div><div class="green">{delta}</div></div>', unsafe_allow_html=True)
     st.markdown('<div class="section">🚀 AI 自動化流程</div>', unsafe_allow_html=True)
     st.markdown('<div class="workflow">' + '<div class="step"><div class="step-icon">📝</div><div class="step-title">商品輸入</div><div class="step-desc">資料與圖片</div></div><div class="arrow">→</div><div class="step"><div class="step-icon">🧠</div><div class="step-title">AI 分析</div><div class="step-desc">分析商品</div></div><div class="arrow">→</div><div class="step"><div class="step-icon">✨</div><div class="step-title">內容生成</div><div class="step-desc">標題與文案</div></div><div class="arrow">→</div><div class="step"><div class="step-icon">⚙️</div><div class="step-title">上架設定</div><div class="step-desc">價格與庫存</div></div><div class="arrow">→</div><div class="step"><div class="step-icon">🚀</div><div class="step-title">一鍵上架</div><div class="step-desc">目前為模擬</div></div></div>', unsafe_allow_html=True)
+    a, b = st.columns([2, 1])
+    with a:
+        st.markdown('<div class="card"><b>📈 最近銷售與工作概況</b></div>', unsafe_allow_html=True)
+        st.line_chart({"銷售額": [18000, 21000, 19500, 26000, 24500, 28000, 28560]})
+    with b:
+        st.markdown('<div class="card"><b>🤖 AI 使用統計</b><h1 style="color:#ff6a00">24.96%</h1>本月使用量<br><br>文案生成：658 次<br>圖片分析：412 次<br>其他功能：178 次</div>', unsafe_allow_html=True)
+
+# -------------------- workspace --------------------
+def workflow_header():
+    st.markdown('<div class="workflow"><div class="step"><div class="step-icon">📝</div><div class="step-title">商品資訊</div><div class="step-desc">輸入商品</div></div><div class="arrow">→</div><div class="step"><div class="step-icon">🧠</div><div class="step-title">AI 分析</div><div class="step-desc">分析圖片與資料</div></div><div class="arrow">→</div><div class="step"><div class="step-icon">✨</div><div class="step-title">內容生成</div><div class="step-desc">文案與 Prompt</div></div><div class="arrow">→</div><div class="step"><div class="step-icon">🚀</div><div class="step-title">上架</div><div class="step-desc">目前為模擬</div></div></div>', unsafe_allow_html=True)
+
+def workspace():
+    workflow_header()
+    left, middle, right = st.columns([1.05, 1.25, 1.2])
+    with left:
+        st.markdown('<div class="card"><b>① 商品資訊輸入</b>', unsafe_allow_html=True)
+        name = st.text_input("商品名稱", value=st.session_state.product_name, placeholder="例如：玻尿酸保濕精華液 30ml")
+        category = st.selectbox("商品分類", ["保養保健", "美妝保養", "3C 電子", "居家生活", "服飾鞋包", "食品飲料", "汽機車", "其他"], index=0)
+        price = st.number_input("商品價格", min_value=0, value=int(st.session_state.price), step=10)
+        stock = st.number_input("商品庫存", min_value=0, value=int(st.session_state.stock), step=1)
+        condition = st.radio("商品狀態", ["全新", "二手"], horizontal=True)
+        points = st.text_area("商品賣點", value=st.session_state.selling_points, placeholder="例如：深層保濕、修護、溫和", height=90)
+        files = st.file_uploader("上傳商品圖片（可多張）", type=["jpg", "jpeg", "png", "webp"], accept_multiple_files=True)
+        if files:
+            st.session_state.images = files
+            st.success(f"已選擇 {len(files)} 張圖片")
+        if st.button("🚀 執行 AI 工作流", use_container_width=True):
+            st.session_state.product_name = name
+            st.session_state.category = category
+            st.session_state.price = price
+            st.session_state.stock = stock
+            st.session_state.condition = condition
+            st.session_state.selling_points = points
+            st.session_state.generated = True
+            
+            success = call_gemini_ai()
+            save_history("執行 AI 工作流")
+            if success:
+                st.success("✨ Gemini AI 已成功生成商品爆款文案！")
+        st.markdown('</div>', unsafe_allow_html=True)
+    with middle:
+        st.markdown('<div class="card"><b>② AI 分析結果</b>', unsafe_allow_html=True)
+        tabs = st.tabs(["商品分析", "標題建議", "關鍵字", "賣點"])
+        with tabs[0]:
+            if st.session_state.images:
+                try:
+                    img = Image.open(st.session_state.images[0])
+                    st.image(img, use_container_width=True)
+                except Exception:
+                    st.warning("圖片無法讀取")
+            else:
+                st.info("尚未上傳商品圖片")
+            st.write(f"商品：{current_name()}")
+            st.write(get_res("analysis", lambda: "點擊【🚀 執行 AI 工作流】後，Gemini 將自動對上傳圖片與資訊進行深度分析。"))
+        with tabs[1]:
+            cur_title = get_res("title", title_text)
+            for i, text in enumerate([cur_title, f"{current_name()}｜高CP值熱銷款式｜日常必備", f"【現貨速發】{current_name()}｜官方正品"]):
+                st.checkbox(text, value=(i == 0), key=f"suggest_{i}")
+        with tabs[2]:
+            kw_str = get_res("keywords", keywords_text)
+            st.markdown("".join(f'<span class="tag">#{x.strip()}</span>' for x in kw_str.replace("，", ",").split(",")), unsafe_allow_html=True)
+        with tabs[3]:
+            for x in ["深層保濕補水", "日常修護", "溫和好使用", "清爽不黏膩"]:
+                st.markdown(f'<div><span class="check">✓</span> {x}</div>', unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
+    with right:
+        st.markdown('<div class="card"><b>③ AI 內容生成</b>', unsafe_allow_html=True)
+        tabs = st.tabs(["商品標題", "商品描述", "關鍵字", "TikTok 文案", "即夢 Prompt"])
+        with tabs[0]:
+            st.text_area("標題", get_res("title", title_text), height=120)
+        with tabs[1]:
+            st.text_area("描述", get_res("description", description_text), height=200)
+        with tabs[2]:
+            st.text_area("關鍵字", get_res("keywords", keywords_text), height=90)
+        with tabs[3]:
+            st.text_area("TikTok", get_res("tiktok", tiktok_text), height=170)
+        with tabs[4]:
+            st.text_area("即夢 AI 2.5 Prompt", get_res("jimeng", jimeng_prompt), height=260)
+        st.markdown('</div>', unsafe_allow_html=True)
+    bottom1, bottom2, bottom3 = st.columns([1, 1.2, 1])
+    with bottom1:
+        st.markdown('<div class="card"><b>④ 蝦皮上架設定</b>', unsafe_allow_html=True)
+        st.selectbox("物流", ["蝦皮店到店", "7-11 店到店", "全家店到店", "賣家宅配"])
+        st.selectbox("出貨地", ["台灣・新北市", "台灣・台北市", "台灣・桃園市"])
+        st.text_input("商品規格", "30ml")
+        st.number_input("上架庫存", min_value=0, value=int(st.session_state.stock))
+        st.selectbox("出貨天數", ["1 天內出貨", "2 天內出貨", "3 天內出貨", "7 天內出貨"])
+        st.toggle("自動回覆買家問題", True)
+        st.markdown('</div>', unsafe_allow_html=True)
+    with bottom2:
+        st.markdown('<div class="card"><b>⑤ 蝦皮上架預覽</b>', unsafe_allow_html=True)
+        if st.session_state.images:
+            try:
+                st.image(Image.open(st.session_state.images[0]), use_container_width=True)
+            except Exception:
+                st.info("圖片預覽失敗")
+        else:
+            st.info("尚未上傳商品圖片")
+        st.markdown(f'<div style="background:#fff;color:#222;padding:12px;border-radius:9px"><b>{current_name()}</b><div style="color:#ee4d2d;font-size:25px;font-weight:800">NT${st.session_state.price}</div><small>⭐⭐⭐⭐⭐　預覽資料</small></div>', unsafe_allow_html=True)
+        if st.button("🚀 一鍵上架蝦皮（模擬）", use_container_width=True):
+            st.session_state.published += 1
+            save_history("一鍵上架模擬")
+            st.success("模擬上架完成；尚未連接蝦皮官方 API，不會真的發布商品。")
+        st.markdown('</div>', unsafe_allow_html=True)
+    with bottom3:
+        status_str = "🟢 Gemini 2.5 在線" if (st.session_state.api_key or GEMINI_KEY) else "🟡 離線展示模式"
+        st.markdown(f'<div class="card"><b>系統狀態</b><h2>{status_str}</h2>圖片：{len(st.session_state.images)} 張<br>模擬上架：{st.session_state.published} 次<br>版本：{APP_VERSION}</div>', unsafe_allow_html=True)
+
+# -------------------- generic pages --------------------
+def generic_page(page):
+    info = {
+        "商品管理": ("📦", "管理商品資料與上架狀態"),
+        "訂單管理": ("🧾", "管理訂單與出貨流程"),
+        "數據分析": ("📊", "查看銷售與使用數據"),
+        "AI 素材庫": ("🖼️", "管理圖片、影片與 Prompt"),
+        "歷史紀錄": ("🕘", "查看操作歷史"),
+        "TikTok 短影音": ("🎵", "建立 9:16 短影音內容"),
+        "蝦皮分潤管理": ("💰", "查看分潤資料"),
+        "會員管理": ("👤", "管理會員帳號與期限"),
+        "管理員中心": ("🛡️", "管理系統權限"),
+        "系統設定": ("⚙️", "系統功能設定"),
+        "API 設定": ("🔑", "AI 與蝦皮 API 設定"),
+        "使用教學": ("📚", "操作說明"),
+    }
+    icon, desc = info.get(page, ("⚙️", "系統功能"))
+    st.markdown(f'<div class="card"><div style="font-size:28px">{icon}</div><div class="title">{page}</div><div class="sub">{desc}</div></div>', unsafe_allow_html=True)
+    if page == "商品管理":
+        st.dataframe({"商品":["玻尿酸保濕精華液","修護面膜","保濕乳液"],"價格":[499,299,399],"庫存":[100,250,88],"狀態":["上架中","上架中","草稿"]}, use_container_width=True, hide_index=True)
+    elif page == "訂單管理":
+        st.info("目前為介面展示版，尚未連接蝦皮訂單 API。")
+    elif page == "數據分析":
+        a,b,c=st.columns(3)
+        a.metric("今日銷售額","NT$28,560","+25%")
+        b.metric("今日訂單","58","+15%")
+        c.metric("瀏覽人次","5,689","+22%")
+        st.line_chart({"銷售額":[18000,21000,19500,26000,24500,28000,28560]})
+    elif page == "AI 素材庫":
+        st.info("素材庫介面已建立；目前資料只保存在本次 Streamlit 工作階段。")
+    elif page == "歷史紀錄":
+        if st.session_state.history:
+            st.dataframe(st.session_state.history, use_container_width=True, hide_index=True)
+        else:
+            st.info("尚無歷史紀錄。")
+    elif page == "TikTok 短影音":
+        st.text_area("9:16 短影音腳本", get_res("tiktok", tiktok_text), height=180)
+        st.text_area("即夢 AI 2.5 Prompt", get_res("jimeng", jimeng_prompt), height=230)
+        st.info("目前只生成文字 Prompt，尚未連接影片生成服務。")
+    elif page == "蝦皮分潤管理":
+        st.metric("本月分潤","NT$12,580","+18%")
+    elif page == "會員管理":
+        st.info("會員管理介面已建立。正式登入與永久會員資料庫可在下一階段接入。")
+    elif page == "管理員中心":
+        st.warning("目前為展示介面，正式管理員驗證尚未連接資料庫。")
+    elif page == "系統設定":
+        st.toggle("啟用 AI 自動分析", True)
+        st.toggle("自動保存歷史紀錄", True)
+        st.toggle("深色科技介面", True)
+    elif page == "API 設定":
+        st.info("可於下方輸入 API Key，或直接在 Streamlit Cloud Secrets 中配置 GEMINI_KEY。")
+        key_input = st.text_input("Gemini API Key", value=st.session_state.api_key, type="password")
+        if st.button("儲存 API Key"):
+            st.session_state.api_key = key_input
+            st.success("API Key 已成功儲存於目前工作階段！")
+        st.text_input("Shopee API Key", type="password")
+    elif page == "使用教學":
+        st.markdown("""### 使用流程\n1. 輸入商品名稱、分類、價格、庫存。\n2. 上傳一張或多張商品圖片。\n3. 點擊【🚀 執行 AI 工作流】將圖片與資料發送給 Gemini AI。\n4. 自動獲取生成的標題、描述、關鍵字、TikTok 文案與即夢 Prompt。\n5. 使用蝦皮預覽確認資料。\n6. 目前一鍵上架為**模擬功能**，尚未真的連接蝦皮。""")
+
+# -------------------- run --------------------
+sidebar()
+header()
+
+if st.session_state.page == "Dashboard":
+    dashboard()
+elif st.session_state.page == "商品上架工作台":
+    metrics()
+    workspace()
+else:
+    generic_page(st.session_state.page)
+
+st.markdown('<div style="text-align:center;color:#52606e;font-size:10px;padding:25px 0 10px">AI 蝦皮自動化 2.5 PRO ・ Streamlit Cloud Ready</div>', unsafe_allow_html=True)v></div>', unsafe_allow_html=True)
     a, b = st.columns([2, 1])
     with a:
         st.markdown('<div class="card"><b>📈 最近銷售與工作概況</b></div>', unsafe_allow_html=True)
